@@ -1,0 +1,16 @@
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\bin\Debug\net8.0-windows\VideoConverter.exe
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\bin\Debug\net8.0-windows\VideoConverter.deps.json
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\bin\Debug\net8.0-windows\VideoConverter.runtimeconfig.json
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\bin\Debug\net8.0-windows\VideoConverter.dll
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\bin\Debug\net8.0-windows\VideoConverter.pdb
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.Form1.resources
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.csproj.GenerateResource.cache
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.AssemblyInfoInputs.cache
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.AssemblyInfo.cs
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.csproj.CoreCompileInputs.cache
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.dll
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\refint\VideoConverter.dll
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.pdb
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.genruntimeconfig.cache
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\ref\VideoConverter.dll
