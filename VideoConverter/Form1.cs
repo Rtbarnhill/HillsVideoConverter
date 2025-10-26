@@ -1,15 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Data;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Windows.Media.MediaProperties;
+using Windows.Media.Transcoding;
+using Windows.Storage;
+using Windows.Storage.FileProperties;
 
 namespace VideoConverter
 {
@@ -19,7 +22,6 @@ namespace VideoConverter
         private BindingList<ConversionJob> jobBindingList;
         private const int MAX_CONCURRENT_CONVERSIONS = 3;
         private int activeConversions = 0;
-        private string ffmpegPath = "ffmpeg.exe"; // Ensure FFmpeg is in the same directory or PATH
 
         public Form1()
         {
@@ -40,7 +42,6 @@ namespace VideoConverter
             jobBindingList = new BindingList<ConversionJob>();
 
             CreateUI();
-            CheckFFmpegAvailability();
         }
 
         private void CreateUI()
@@ -127,7 +128,7 @@ namespace VideoConverter
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 10)
             };
-            cmbFormat.Items.AddRange(new string[] { "MP4", "AVI", "MKV", "MOV", "WMV", "FLV", "WEBM", "MP3", "AAC", "WAV", "FLAC", "OGG" });
+            cmbFormat.Items.AddRange(new string[] { "MP4", "WMV", "AVI", "WEBM", "MP3", "M4A", "WMA", "WAV" });
             cmbFormat.SelectedIndex = 0;
             controlPanel.Controls.Add(cmbFormat);
 
@@ -218,22 +219,6 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 9)
             };
             controlPanel.Controls.Add(chkAudioOnly);
-
-            // Audio Overlay
-            Button btnAudioOverlay = CreateStyledButton("🎵 Add Audio Overlay", new Point(460, 110), new Size(160, 30));
-            btnAudioOverlay.Click += BtnAudioOverlay_Click;
-            controlPanel.Controls.Add(btnAudioOverlay);
-
-            Label lblAudioFile = new Label
-            {
-                Name = "lblAudioFile",
-                Text = "No audio overlay selected",
-                Location = new Point(630, 115),
-                Size = new Size(400, 25),
-                ForeColor = Color.FromArgb(150, 150, 150),
-                Font = new Font("Segoe UI", 8, FontStyle.Italic)
-            };
-            controlPanel.Controls.Add(lblAudioFile);
 
             // Output Destination
             Label lblOutput = CreateStyledLabel("Output Folder:", new Point(15, 150));
@@ -388,9 +373,9 @@ namespace VideoConverter
             using (OpenFileDialog ofd = new OpenFileDialog())
             {
                 ofd.Title = "Select Video/Audio Files";
-                ofd.Filter = "All Supported Files|*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm;*.m4v;*.mpg;*.mpeg;*.3gp;*.mp3;*.wav;*.aac;*.flac;*.ogg;*.wma|" +
-                             "Video Files|*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm;*.m4v;*.mpg;*.mpeg;*.3gp|" +
-                             "Audio Files|*.mp3;*.wav;*.aac;*.flac;*.ogg;*.wma|" +
+                ofd.Filter = "All Supported Files|*.mp4;*.wmv;*.avi;*.webm;*.mp3;*.m4a;*.wma;*.wav|" +
+                             "Video Files|*.mp4;*.wmv;*.avi;*.webm|" +
+                             "Audio Files|*.mp3;*.m4a;*.wma;*.wav|" +
                              "All Files|*.*";
                 ofd.Multiselect = true;
 
@@ -411,26 +396,6 @@ namespace VideoConverter
                     string[] files = Directory.GetFiles(fbd.SelectedPath, "*.*", SearchOption.AllDirectories)
                         .Where(f => IsVideoOrAudioFile(f)).ToArray();
                     AddFilesToQueue(files);
-                }
-            }
-        }
-
-        private void BtnAudioOverlay_Click(object sender, EventArgs e)
-        {
-            using (OpenFileDialog ofd = new OpenFileDialog())
-            {
-                ofd.Title = "Select Audio File for Overlay";
-                ofd.Filter = "Audio Files|*.mp3;*.wav;*.aac;*.flac;*.ogg;*.wma|All Files|*.*";
-
-                if (ofd.ShowDialog() == DialogResult.OK)
-                {
-                    Label lblAudioFile = this.Controls.Find("lblAudioFile", true).FirstOrDefault() as Label;
-                    if (lblAudioFile != null)
-                    {
-                        lblAudioFile.Text = $"Audio Overlay: {Path.GetFileName(ofd.FileName)}";
-                        lblAudioFile.Tag = ofd.FileName;
-                        lblAudioFile.ForeColor = Color.FromArgb(100, 200, 100);
-                    }
                 }
             }
         }
@@ -495,26 +460,26 @@ namespace VideoConverter
             CheckBox chkMuteAudio = this.Controls.Find("chkMuteAudio", true).FirstOrDefault() as CheckBox;
             CheckBox chkAudioOnly = this.Controls.Find("chkAudioOnly", true).FirstOrDefault() as CheckBox;
             TextBox txtOutputPath = this.Controls.Find("txtOutputPath", true).FirstOrDefault() as TextBox;
-            Label lblAudioFile = this.Controls.Find("lblAudioFile", true).FirstOrDefault() as Label;
 
             foreach (string file in files)
             {
                 if (!File.Exists(file)) continue;
 
                 FileInfo fi = new FileInfo(file);
+                string selectedFormat = cmbFormat?.SelectedItem?.ToString() ?? "MP4";
+                bool isAudioFormat = new[] { "MP3", "M4A", "WMA", "WAV" }.Contains(selectedFormat.ToUpperInvariant());
 
                 ConversionJob job = new ConversionJob
                 {
                     InputPath = file,
                     FileName = fi.Name,
                     FileSize = fi.Length,
-                    OutputFormat = cmbFormat?.SelectedItem?.ToString() ?? "MP4",
+                    OutputFormat = selectedFormat,
                     Resolution = cmbResolution?.SelectedItem?.ToString() ?? "Original",
                     Quality = cmbQuality?.SelectedItem?.ToString() ?? "High (Original)",
                     CustomBitrate = cmbQuality?.SelectedIndex == 3 ? (txtBitrate?.Text ?? "5000") : null,
-                    MuteAudio = chkMuteAudio?.Checked ?? false,
-                    AudioOnly = chkAudioOnly?.Checked ?? false,
-                    AudioOverlayPath = lblAudioFile?.Tag as string,
+                    MuteAudio = !isAudioFormat && (chkMuteAudio?.Checked ?? false),
+                    AudioOnly = (chkAudioOnly?.Checked ?? false) || isAudioFormat,
                     OutputDirectory = txtOutputPath?.Text ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
                     Status = ConversionStatus.Queued
                 };
@@ -640,13 +605,22 @@ namespace VideoConverter
 
             try
             {
-                await Task.Run(() => ConvertFile(job), job.CancellationToken.Token);
+                await ConvertFileAsync(job);
 
-                if (!job.CancellationToken.IsCancellationRequested)
+                if (job.CancellationToken.IsCancellationRequested)
+                {
+                    job.Status = ConversionStatus.Cancelled;
+                }
+                else
                 {
                     job.Status = ConversionStatus.Completed;
                     job.Progress = 100;
+                    job.Speed = "1x";
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                job.Status = ConversionStatus.Cancelled;
             }
             catch (Exception ex)
             {
@@ -661,271 +635,220 @@ namespace VideoConverter
             }
         }
 
-        private void ConvertFile(ConversionJob job)
+
+        private async Task ConvertFileAsync(ConversionJob job)
         {
-            if (!File.Exists(ffmpegPath) && !IsFFmpegInPath())
+            if (job.CancellationToken.IsCancellationRequested)
             {
-                throw new Exception("FFmpeg not found! Please ensure ffmpeg.exe is in the application directory or system PATH.");
+                throw new OperationCanceledException();
             }
 
-            string arguments = BuildFFmpegArguments(job);
+            Directory.CreateDirectory(job.OutputDirectory);
 
-            ProcessStartInfo psi = new ProcessStartInfo
+            StorageFile inputFile = await StorageFile.GetFileFromPathAsync(job.InputPath).AsTask();
+            StorageFolder outputFolder = await StorageFolder.GetFolderFromPathAsync(job.OutputDirectory).AsTask();
+            StorageFile outputFile = await outputFolder.CreateFileAsync(Path.GetFileName(job.OutputPath), CreationCollisionOption.ReplaceExisting).AsTask();
+
+            MediaEncodingProfile profile = CreateEncodingProfile(job);
+
+            MediaTranscoder transcoder = new MediaTranscoder();
+            if (job.MuteAudio)
             {
-                FileName = ffmpegPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                CreateNoWindow = true,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-
-            using (Process process = new Process { StartInfo = psi })
-            {
-                process.ErrorDataReceived += (s, e) =>
-                {
-                    if (!string.IsNullOrEmpty(e.Data))
-                    {
-                        ParseFFmpegProgress(job, e.Data);
-                    }
-                };
-
-                process.Start();
-                process.BeginErrorReadLine();
-
-                while (!process.HasExited)
-                {
-                    if (job.CancellationToken.IsCancellationRequested)
-                    {
-                        process.Kill();
-                        throw new OperationCanceledException();
-                    }
-                    Thread.Sleep(100);
-                }
-
-                if (process.ExitCode != 0 && !job.CancellationToken.IsCancellationRequested)
-                {
-                    throw new Exception($"FFmpeg conversion failed with exit code {process.ExitCode}");
-                }
+                transcoder.AudioProcessing = MediaAudioProcessing.Mute;
             }
+
+            job.TotalDuration = await GetMediaDurationAsync(inputFile);
+
+            PrepareTranscodeResult prepared = await transcoder.PrepareFileTranscodeAsync(inputFile, outputFile, profile).AsTask(job.CancellationToken.Token);
+
+            if (!prepared.CanTranscode)
+            {
+                throw new InvalidOperationException($"Transcoding failed: {prepared.FailureReason}");
+            }
+
+            var progressHandler = new Progress<double>(value =>
+            {
+                job.Progress = (int)Math.Round(value * 100);
+                job.Progress = Math.Min(100, Math.Max(0, job.Progress));
+
+                if (job.StartTime.HasValue && value > 0 && job.TotalDuration > TimeSpan.Zero)
+                {
+                    var elapsed = DateTime.Now - job.StartTime.Value;
+                    if (elapsed.TotalSeconds > 0)
+                    {
+                        double speed = (value * job.TotalDuration.TotalSeconds) / elapsed.TotalSeconds;
+                        job.Speed = $"{speed:0.##}x";
+                    }
+                }
+
+                job.UpdateDisplay();
+            });
+
+            await prepared.TranscodeAsync().AsTask(job.CancellationToken.Token, progressHandler);
         }
 
-        private string BuildFFmpegArguments(ConversionJob job)
+        private MediaEncodingProfile CreateEncodingProfile(ConversionJob job)
         {
-            StringBuilder args = new StringBuilder();
+            string format = job.OutputFormat.ToLowerInvariant();
 
-            // Input file
-            args.Append($"-i \"{job.InputPath}\" ");
-
-            // Audio overlay
-            if (!string.IsNullOrEmpty(job.AudioOverlayPath) && File.Exists(job.AudioOverlayPath))
-            {
-                args.Append($"-i \"{job.AudioOverlayPath}\" ");
-                args.Append("-filter_complex \"[0:a][1:a]amix=inputs=2:duration=first\" ");
-            }
-
-            // Resolution scaling
-            if (job.Resolution != "Original")
-            {
-                string resolution = job.Resolution.Split('(')[0].Trim();
-                args.Append($"-vf scale={resolution} ");
-            }
-
-            // Quality/Bitrate settings
-            if (job.Quality == "High (Original)")
-            {
-                args.Append("-c:v libx264 -preset slow -crf 18 ");
-            }
-            else if (job.Quality == "Medium (Balanced)")
-            {
-                args.Append("-c:v libx264 -preset medium -crf 23 ");
-            }
-            else if (job.Quality == "Low (Compressed)")
-            {
-                args.Append("-c:v libx264 -preset fast -crf 28 ");
-            }
-            else if (job.Quality == "Custom Bitrate" && !string.IsNullOrEmpty(job.CustomBitrate))
-            {
-                args.Append($"-b:v {job.CustomBitrate}k ");
-            }
-
-            // Audio settings
             if (job.AudioOnly)
             {
-                args.Append("-vn -acodec ");
-                switch (job.OutputFormat.ToLower())
+                MediaEncodingProfile audioProfile = format switch
                 {
-                    case "mp3":
-                        args.Append("libmp3lame "); break;
-                    case "aac": args.Append("aac "); break;
-                    case "wav": args.Append("pcm_s16le "); break;
-                    case "flac": args.Append("flac "); break;
-                    case "ogg": args.Append("libvorbis "); break;
-                    default: args.Append("copy "); break;
-                }
+                    "mp3" => MediaEncodingProfile.CreateMp3(AudioEncodingQuality.Automatic),
+                    "m4a" => MediaEncodingProfile.CreateM4a(AudioEncodingQuality.Automatic),
+                    "wma" => MediaEncodingProfile.CreateWma(AudioEncodingQuality.Automatic),
+                    "wav" => MediaEncodingProfile.CreateWav(AudioEncodingQuality.Automatic),
+                    _ => MediaEncodingProfile.CreateMp3(AudioEncodingQuality.Automatic)
+                };
+
+                ApplyAudioQuality(audioProfile, job);
+                return audioProfile;
             }
-            else if (job.MuteAudio)
+
+            VideoEncodingQuality videoQuality = MapResolutionToQuality(job.Resolution);
+
+            MediaEncodingProfile profile = format switch
             {
-                args.Append("-an ");
-            }
-            else
+                "mp4" => MediaEncodingProfile.CreateMp4(videoQuality),
+                "wmv" => MediaEncodingProfile.CreateWmv(videoQuality),
+                "avi" => MediaEncodingProfile.CreateAvi(videoQuality),
+                "webm" => MediaEncodingProfile.CreateWebm(videoQuality),
+                _ => MediaEncodingProfile.CreateMp4(videoQuality)
+            };
+
+            ApplyVideoQuality(profile, job);
+
+            if (job.MuteAudio)
             {
-                args.Append("-c:a aac -b:a 192k ");
+                profile.Audio = null;
             }
 
-            // Output format specific settings
-            switch (job.OutputFormat.ToLower())
-            {
-                case "mp4":
-                    args.Append("-f mp4 -movflags +faststart ");
-                    break;
-                case "avi":
-                    args.Append("-f avi ");
-                    break;
-                case "mkv":
-                    args.Append("-f matroska ");
-                    break;
-                case "webm":
-                    args.Append("-c:v libvpx-vp9 -c:a libopus ");
-                    break;
-            }
-
-            // Progress reporting and overwrite
-            args.Append("-progress pipe:1 -y ");
-
-            // Output file
-            args.Append($"\"{job.OutputPath}\"");
-
-            return args.ToString();
+            return profile;
         }
 
-        private void ParseFFmpegProgress(ConversionJob job, string output)
+        private void ApplyAudioQuality(MediaEncodingProfile profile, ConversionJob job)
+        {
+            if (profile.Audio == null)
+            {
+                return;
+            }
+
+            switch (job.Quality)
+            {
+                case "Medium (Balanced)":
+                    profile.Audio.Bitrate = profile.Audio.Bitrate > 0 ? (uint)Math.Max(64000, profile.Audio.Bitrate * 3 / 4) : 128000;
+                    break;
+                case "Low (Compressed)":
+                    profile.Audio.Bitrate = profile.Audio.Bitrate > 0 ? (uint)Math.Max(64000, profile.Audio.Bitrate / 2) : 96000;
+                    break;
+                case "Custom Bitrate":
+                    if (uint.TryParse(job.CustomBitrate, out uint audioKbps))
+                    {
+                        profile.Audio.Bitrate = Math.Max(64000u, audioKbps * 1000);
+                    }
+                    break;
+            }
+        }
+
+        private void ApplyVideoQuality(MediaEncodingProfile profile, ConversionJob job)
+        {
+            if (profile.Video == null)
+            {
+                return;
+            }
+
+            switch (job.Quality)
+            {
+                case "Medium (Balanced)":
+                    if (profile.Video.Bitrate > 0)
+                    {
+                        profile.Video.Bitrate = (uint)(profile.Video.Bitrate * 0.75);
+                    }
+                    break;
+                case "Low (Compressed)":
+                    if (profile.Video.Bitrate > 0)
+                    {
+                        profile.Video.Bitrate = (uint)(profile.Video.Bitrate * 0.5);
+                    }
+                    break;
+                case "Custom Bitrate":
+                    if (uint.TryParse(job.CustomBitrate, out uint videoKbps))
+                    {
+                        profile.Video.Bitrate = videoKbps * 1000;
+                    }
+                    break;
+            }
+        }
+
+        private VideoEncodingQuality MapResolutionToQuality(string resolution)
+        {
+            if (string.IsNullOrWhiteSpace(resolution) || resolution.Equals("Original", StringComparison.OrdinalIgnoreCase))
+            {
+                return VideoEncodingQuality.Auto;
+            }
+
+            if (resolution.Contains("3840x2160"))
+            {
+                return VideoEncodingQuality.Uhd2160p;
+            }
+
+            if (resolution.Contains("2560x1440"))
+            {
+                return VideoEncodingQuality.HD1080p;
+            }
+
+            if (resolution.Contains("1920x1080"))
+            {
+                return VideoEncodingQuality.HD1080p;
+            }
+
+            if (resolution.Contains("1280x720"))
+            {
+                return VideoEncodingQuality.HD720p;
+            }
+
+            if (resolution.Contains("854x480"))
+            {
+                return VideoEncodingQuality.Sd480p;
+            }
+
+            if (resolution.Contains("640x360"))
+            {
+                return VideoEncodingQuality.Nvga;
+            }
+
+            return VideoEncodingQuality.Auto;
+        }
+
+        private async Task<TimeSpan> GetMediaDurationAsync(StorageFile file)
         {
             try
             {
-                // Parse time progress from FFmpeg output
-                if (output.Contains("time="))
+                VideoProperties videoProperties = await file.Properties.GetVideoPropertiesAsync().AsTask();
+                if (videoProperties != null && videoProperties.Duration > TimeSpan.Zero)
                 {
-                    string timeStr = output.Substring(output.IndexOf("time=") + 5).Split(' ')[0];
-                    TimeSpan currentTime = ParseFFmpegTime(timeStr);
-
-                    // Get total duration if not already set
-                    if (job.TotalDuration == TimeSpan.Zero && output.Contains("Duration:"))
-                    {
-                        string durationStr = output.Substring(output.IndexOf("Duration:") + 10).Split(',')[0].Trim();
-                        job.TotalDuration = ParseFFmpegTime(durationStr);
-                    }
-
-                    if (job.TotalDuration > TimeSpan.Zero)
-                    {
-                        job.Progress = (int)((currentTime.TotalSeconds / job.TotalDuration.TotalSeconds) * 100);
-                        job.Progress = Math.Min(100, Math.Max(0, job.Progress));
-                    }
+                    return videoProperties.Duration;
                 }
 
-                // Parse speed
-                if (output.Contains("speed="))
+                MusicProperties musicProperties = await file.Properties.GetMusicPropertiesAsync().AsTask();
+                if (musicProperties != null && musicProperties.Duration > TimeSpan.Zero)
                 {
-                    string speedStr = output.Substring(output.IndexOf("speed=") + 6).Split('x')[0].Trim();
-                    job.Speed = speedStr + "x";
+                    return musicProperties.Duration;
                 }
-
-                // Parse bitrate
-                if (output.Contains("bitrate="))
-                {
-                    string bitrateStr = output.Substring(output.IndexOf("bitrate=") + 8).Split(' ')[0].Trim();
-                    // Could store this if needed
-                }
-
-                // Update duration from output
-                if (output.Contains("Duration:") && job.TotalDuration == TimeSpan.Zero)
-                {
-                    try
-                    {
-                        string durationStr = output.Substring(output.IndexOf("Duration:") + 10, 11);
-                        job.TotalDuration = ParseFFmpegTime(durationStr);
-                    }
-                    catch { }
-                }
-
-                this.Invoke((MethodInvoker)delegate { job.UpdateDisplay(); });
             }
             catch
             {
-                // Ignore parsing errors
+                // Ignore property retrieval failures
             }
-        }
-
-        private TimeSpan ParseFFmpegTime(string timeStr)
-        {
-            try
-            {
-                timeStr = timeStr.Trim();
-                string[] parts = timeStr.Split(':');
-
-                if (parts.Length == 3)
-                {
-                    int hours = int.Parse(parts[0]);
-                    int minutes = int.Parse(parts[1]);
-                    double seconds = double.Parse(parts[2].Replace(',', '.'));
-                    return new TimeSpan(0, hours, minutes, (int)seconds, (int)((seconds % 1) * 1000));
-                }
-            }
-            catch { }
 
             return TimeSpan.Zero;
         }
 
-        #endregion
-
-        #region Helper Methods
-
         private bool IsVideoOrAudioFile(string file)
         {
-            string[] extensions = { ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v",
-                                   ".mpg", ".mpeg", ".3gp", ".mp3", ".wav", ".aac", ".flac", ".ogg", ".wma" };
+            string[] extensions = { ".mp4", ".wmv", ".avi", ".webm", ".mp3", ".m4a", ".wma", ".wav" };
             return extensions.Contains(Path.GetExtension(file).ToLower());
-        }
-
-        private void CheckFFmpegAvailability()
-        {
-            if (!File.Exists(ffmpegPath) && !IsFFmpegInPath())
-            {
-                MessageBox.Show(
-                    "FFmpeg not found!\n\n" +
-                    "This application requires FFmpeg to function.\n\n" +
-                    "Please download FFmpeg from https://ffmpeg.org/download.html\n" +
-                    "and place ffmpeg.exe in the application directory or add it to your system PATH.",
-                    "FFmpeg Required",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-            }
-        }
-
-        private bool IsFFmpegInPath()
-        {
-            try
-            {
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = "ffmpeg",
-                    Arguments = "-version",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                };
-
-                using (Process process = Process.Start(psi))
-                {
-                    process.WaitForExit();
-                    return process.ExitCode == 0;
-                }
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         private void UpdateStatusBar()
@@ -965,7 +888,6 @@ namespace VideoConverter
         public string CustomBitrate { get; set; }
         public bool MuteAudio { get; set; }
         public bool AudioOnly { get; set; }
-        public string AudioOverlayPath { get; set; }
         public string OutputDirectory { get; set; }
         public string OutputPath { get; set; }
         public DateTime? StartTime { get; set; }
