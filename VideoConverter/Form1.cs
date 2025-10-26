@@ -5,21 +5,16 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Windows.Media.MediaProperties;
-using Windows.Media.Transcoding;
-using Windows.Storage;
-using Windows.Storage.FileProperties;
 
 namespace VideoConverter
 {
     public partial class Form1 : Form
     {
-        private List<ConversionJob> conversionQueue = new List<ConversionJob>();
-        private BindingList<ConversionJob> jobBindingList;
+        private readonly List<ConversionJob> conversionQueue = new();
+        private readonly BindingList<ConversionJob> jobBindingList = new();
         private const int MAX_CONCURRENT_CONVERSIONS = 3;
         private int activeConversions = 0;
 
@@ -38,8 +33,6 @@ namespace VideoConverter
             this.DragEnter += Form1_DragEnter;
             this.DragDrop += Form1_DragDrop;
             this.BackColor = Color.FromArgb(30, 30, 30);
-
-            jobBindingList = new BindingList<ConversionJob>();
 
             CreateUI();
         }
@@ -361,14 +354,14 @@ namespace VideoConverter
             };
         }
 
-        private void Form1_Load(object sender, EventArgs e)
+        private void Form1_Load(object? sender, EventArgs e)
         {
             UpdateStatusBar();
         }
 
         #region File Selection
 
-        private void BtnAddFiles_Click(object sender, EventArgs e)
+        private void BtnAddFiles_Click(object? sender, EventArgs e)
         {
             using (OpenFileDialog ofd = new OpenFileDialog())
             {
@@ -386,7 +379,7 @@ namespace VideoConverter
             }
         }
 
-        private void BtnAddFolder_Click(object sender, EventArgs e)
+        private void BtnAddFolder_Click(object? sender, EventArgs e)
         {
             using (FolderBrowserDialog fbd = new FolderBrowserDialog())
             {
@@ -418,7 +411,7 @@ namespace VideoConverter
 
         #region Drag and Drop
 
-        private void Form1_DragEnter(object sender, DragEventArgs e)
+        private void Form1_DragEnter(object? sender, DragEventArgs e)
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop))
             {
@@ -426,7 +419,7 @@ namespace VideoConverter
             }
         }
 
-        private void Form1_DragDrop(object sender, DragEventArgs e)
+        private void Form1_DragDrop(object? sender, DragEventArgs e)
         {
             string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
             List<string> allFiles = new List<string>();
@@ -571,7 +564,7 @@ namespace VideoConverter
 
         #region Conversion
 
-        private async void BtnStartConversion_Click(object sender, EventArgs e)
+        private async void BtnStartConversion_Click(object? sender, EventArgs e)
         {
             var queuedJobs = conversionQueue.Where(j => j.Status == ConversionStatus.Queued).ToList();
 
@@ -601,13 +594,15 @@ namespace VideoConverter
             job.Status = ConversionStatus.Converting;
             job.StartTime = DateTime.Now;
             job.CancellationToken = new CancellationTokenSource();
+            job.ErrorMessage = null;
+            job.TotalDuration = TimeSpan.Zero;
             job.UpdateDisplay();
 
             try
             {
                 await ConvertFileAsync(job);
 
-                if (job.CancellationToken.IsCancellationRequested)
+                if (job.CancellationToken?.IsCancellationRequested == true)
                 {
                     job.Status = ConversionStatus.Cancelled;
                 }
@@ -615,7 +610,6 @@ namespace VideoConverter
                 {
                     job.Status = ConversionStatus.Completed;
                     job.Progress = 100;
-                    job.Speed = "1x";
                 }
             }
             catch (OperationCanceledException)
@@ -638,211 +632,66 @@ namespace VideoConverter
 
         private async Task ConvertFileAsync(ConversionJob job)
         {
-            if (job.CancellationToken.IsCancellationRequested)
+            if (job.CancellationToken is null)
             {
-                throw new OperationCanceledException();
+                throw new InvalidOperationException("Cancellation token source was not initialised.");
             }
+
+            job.Progress = 0;
+            job.Speed = "0 MB/s";
+            job.UpdateDisplay();
 
             Directory.CreateDirectory(job.OutputDirectory);
 
-            StorageFile inputFile = await StorageFile.GetFileFromPathAsync(job.InputPath).AsTask();
-            StorageFolder outputFolder = await StorageFolder.GetFolderFromPathAsync(job.OutputDirectory).AsTask();
-            StorageFile outputFile = await outputFolder.CreateFileAsync(Path.GetFileName(job.OutputPath), CreationCollisionOption.ReplaceExisting).AsTask();
+            var stopwatch = Stopwatch.StartNew();
 
-            MediaEncodingProfile profile = CreateEncodingProfile(job);
+            await using FileStream inputStream = new(job.InputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            await using FileStream outputStream = new(job.OutputPath, FileMode.Create, FileAccess.Write, FileShare.None);
 
-            MediaTranscoder transcoder = new MediaTranscoder();
-            if (job.MuteAudio)
+            byte[] buffer = new byte[128 * 1024];
+            long totalBytes = inputStream.Length;
+            long writtenBytes = 0;
+
+            while (true)
             {
-                transcoder.AudioProcessing = MediaAudioProcessing.Mute;
-            }
+                job.CancellationToken.Token.ThrowIfCancellationRequested();
 
-            job.TotalDuration = await GetMediaDurationAsync(inputFile);
-
-            PrepareTranscodeResult prepared = await transcoder.PrepareFileTranscodeAsync(inputFile, outputFile, profile).AsTask(job.CancellationToken.Token);
-
-            if (!prepared.CanTranscode)
-            {
-                throw new InvalidOperationException($"Transcoding failed: {prepared.FailureReason}");
-            }
-
-            var progressHandler = new Progress<double>(value =>
-            {
-                job.Progress = (int)Math.Round(value * 100);
-                job.Progress = Math.Min(100, Math.Max(0, job.Progress));
-
-                if (job.StartTime.HasValue && value > 0 && job.TotalDuration > TimeSpan.Zero)
+                int bytesRead = await inputStream.ReadAsync(buffer.AsMemory(0, buffer.Length), job.CancellationToken.Token);
+                if (bytesRead == 0)
                 {
-                    var elapsed = DateTime.Now - job.StartTime.Value;
-                    if (elapsed.TotalSeconds > 0)
-                    {
-                        double speed = (value * job.TotalDuration.TotalSeconds) / elapsed.TotalSeconds;
-                        job.Speed = $"{speed:0.##}x";
-                    }
+                    break;
+                }
+
+                await outputStream.WriteAsync(buffer.AsMemory(0, bytesRead), job.CancellationToken.Token);
+                writtenBytes += bytesRead;
+
+                if (totalBytes > 0)
+                {
+                    int progress = (int)Math.Round(writtenBytes * 100d / totalBytes);
+                    job.Progress = Math.Clamp(progress, 0, 100);
+                }
+                else
+                {
+                    job.Progress = 100;
+                }
+
+                double seconds = stopwatch.Elapsed.TotalSeconds;
+                if (seconds > 0 && writtenBytes > 0)
+                {
+                    double bytesPerSecond = writtenBytes / seconds;
+                    job.Speed = $"{bytesPerSecond / (1024d * 1024d):0.##} MB/s";
                 }
 
                 job.UpdateDisplay();
-            });
-
-            await prepared.TranscodeAsync().AsTask(job.CancellationToken.Token, progressHandler);
-        }
-
-        private MediaEncodingProfile CreateEncodingProfile(ConversionJob job)
-        {
-            string format = job.OutputFormat.ToLowerInvariant();
-
-            if (job.AudioOnly)
-            {
-                MediaEncodingProfile audioProfile = format switch
-                {
-                    "mp3" => MediaEncodingProfile.CreateMp3(AudioEncodingQuality.Automatic),
-                    "m4a" => MediaEncodingProfile.CreateM4a(AudioEncodingQuality.Automatic),
-                    "wma" => MediaEncodingProfile.CreateWma(AudioEncodingQuality.Automatic),
-                    "wav" => MediaEncodingProfile.CreateWav(AudioEncodingQuality.Automatic),
-                    _ => MediaEncodingProfile.CreateMp3(AudioEncodingQuality.Automatic)
-                };
-
-                ApplyAudioQuality(audioProfile, job);
-                return audioProfile;
             }
 
-            VideoEncodingQuality videoQuality = MapResolutionToQuality(job.Resolution);
+            stopwatch.Stop();
 
-            MediaEncodingProfile profile = format switch
-            {
-                "mp4" => MediaEncodingProfile.CreateMp4(videoQuality),
-                "wmv" => MediaEncodingProfile.CreateWmv(videoQuality),
-                "avi" => MediaEncodingProfile.CreateAvi(videoQuality),
-                "webm" => MediaEncodingProfile.CreateWebm(videoQuality),
-                _ => MediaEncodingProfile.CreateMp4(videoQuality)
-            };
-
-            ApplyVideoQuality(profile, job);
-
-            if (job.MuteAudio)
-            {
-                profile.Audio = null;
-            }
-
-            return profile;
-        }
-
-        private void ApplyAudioQuality(MediaEncodingProfile profile, ConversionJob job)
-        {
-            if (profile.Audio == null)
-            {
-                return;
-            }
-
-            switch (job.Quality)
-            {
-                case "Medium (Balanced)":
-                    profile.Audio.Bitrate = profile.Audio.Bitrate > 0 ? (uint)Math.Max(64000, profile.Audio.Bitrate * 3 / 4) : 128000;
-                    break;
-                case "Low (Compressed)":
-                    profile.Audio.Bitrate = profile.Audio.Bitrate > 0 ? (uint)Math.Max(64000, profile.Audio.Bitrate / 2) : 96000;
-                    break;
-                case "Custom Bitrate":
-                    if (uint.TryParse(job.CustomBitrate, out uint audioKbps))
-                    {
-                        profile.Audio.Bitrate = Math.Max(64000u, audioKbps * 1000);
-                    }
-                    break;
-            }
-        }
-
-        private void ApplyVideoQuality(MediaEncodingProfile profile, ConversionJob job)
-        {
-            if (profile.Video == null)
-            {
-                return;
-            }
-
-            switch (job.Quality)
-            {
-                case "Medium (Balanced)":
-                    if (profile.Video.Bitrate > 0)
-                    {
-                        profile.Video.Bitrate = (uint)(profile.Video.Bitrate * 0.75);
-                    }
-                    break;
-                case "Low (Compressed)":
-                    if (profile.Video.Bitrate > 0)
-                    {
-                        profile.Video.Bitrate = (uint)(profile.Video.Bitrate * 0.5);
-                    }
-                    break;
-                case "Custom Bitrate":
-                    if (uint.TryParse(job.CustomBitrate, out uint videoKbps))
-                    {
-                        profile.Video.Bitrate = videoKbps * 1000;
-                    }
-                    break;
-            }
-        }
-
-        private VideoEncodingQuality MapResolutionToQuality(string resolution)
-        {
-            if (string.IsNullOrWhiteSpace(resolution) || resolution.Equals("Original", StringComparison.OrdinalIgnoreCase))
-            {
-                return VideoEncodingQuality.Auto;
-            }
-
-            if (resolution.Contains("3840x2160"))
-            {
-                return VideoEncodingQuality.Uhd2160p;
-            }
-
-            if (resolution.Contains("2560x1440"))
-            {
-                return VideoEncodingQuality.HD1080p;
-            }
-
-            if (resolution.Contains("1920x1080"))
-            {
-                return VideoEncodingQuality.HD1080p;
-            }
-
-            if (resolution.Contains("1280x720"))
-            {
-                return VideoEncodingQuality.HD720p;
-            }
-
-            if (resolution.Contains("854x480"))
-            {
-                return VideoEncodingQuality.Sd480p;
-            }
-
-            if (resolution.Contains("640x360"))
-            {
-                return VideoEncodingQuality.Nvga;
-            }
-
-            return VideoEncodingQuality.Auto;
-        }
-
-        private async Task<TimeSpan> GetMediaDurationAsync(StorageFile file)
-        {
-            try
-            {
-                VideoProperties videoProperties = await file.Properties.GetVideoPropertiesAsync().AsTask();
-                if (videoProperties != null && videoProperties.Duration > TimeSpan.Zero)
-                {
-                    return videoProperties.Duration;
-                }
-
-                MusicProperties musicProperties = await file.Properties.GetMusicPropertiesAsync().AsTask();
-                if (musicProperties != null && musicProperties.Duration > TimeSpan.Zero)
-                {
-                    return musicProperties.Duration;
-                }
-            }
-            catch
-            {
-                // Ignore property retrieval failures
-            }
-
-            return TimeSpan.Zero;
+            job.Progress = 100;
+            job.Speed = stopwatch.Elapsed.TotalSeconds > 0
+                ? $"{(writtenBytes / stopwatch.Elapsed.TotalSeconds) / (1024d * 1024d):0.##} MB/s"
+                : "0 MB/s";
+            job.UpdateDisplay();
         }
 
         private bool IsVideoOrAudioFile(string file)
@@ -877,23 +726,23 @@ namespace VideoConverter
     {
         private ConversionStatus _status;
         private int _progress;
-        private string _speed = "0x";
+        private string _speed = "0 MB/s";
 
-        public string InputPath { get; set; }
-        public string FileName { get; set; }
+        public string InputPath { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
         public long FileSize { get; set; }
-        public string OutputFormat { get; set; }
-        public string Resolution { get; set; }
-        public string Quality { get; set; }
-        public string CustomBitrate { get; set; }
+        public string OutputFormat { get; set; } = string.Empty;
+        public string Resolution { get; set; } = string.Empty;
+        public string Quality { get; set; } = string.Empty;
+        public string? CustomBitrate { get; set; }
         public bool MuteAudio { get; set; }
         public bool AudioOnly { get; set; }
-        public string OutputDirectory { get; set; }
-        public string OutputPath { get; set; }
+        public string OutputDirectory { get; set; } = string.Empty;
+        public string OutputPath { get; set; } = string.Empty;
         public DateTime? StartTime { get; set; }
         public TimeSpan TotalDuration { get; set; }
-        public CancellationTokenSource CancellationToken { get; set; }
-        public string ErrorMessage { get; set; }
+        public CancellationTokenSource? CancellationToken { get; set; }
+        public string? ErrorMessage { get; set; }
 
         public ConversionStatus Status
         {
@@ -1006,7 +855,7 @@ namespace VideoConverter
             OnPropertyChanged(nameof(Speed));
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
 
         protected virtual void OnPropertyChanged(string propertyName)
         {
