@@ -14,3 +14,4 @@ C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windo
 C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.pdb
 C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.genruntimeconfig.cache
 C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\ref\VideoConverter.dll
+C:\Users\Rtbar\source\repos\VideoConverter\VideoConverter\obj\Debug\net8.0-windows\VideoConverter.sourcelink.json
