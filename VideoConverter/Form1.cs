@@ -57,6 +57,27 @@ namespace VideoConverter
         private bool? preferredGpuToggleState;
         private const int MAX_RETRIES = 2;
         private bool statusBarUpdatePendingHandle;
+        private Panel mainContentHost;
+        private readonly Dictionary<string, Control> contentPages = new Dictionary<string, Control>();
+        private readonly Dictionary<string, Button> navigationButtons = new Dictionary<string, Button>();
+        private Button activeNavButton;
+        private Label lblStatusControl;
+        private Label lblMissionQueuedValue;
+        private Label lblMissionActiveValue;
+        private Label lblMissionCompletedValue;
+        private Label lblMissionFailedValue;
+        private Label lblMissionAutoShutdownValue;
+        private Label lblMissionParallelValue;
+        private Label lblMissionFfmpegValue;
+        private ListBox lstMissionActivity;
+        private readonly Queue<string> missionActivityBuffer = new Queue<string>();
+        private readonly object missionActivityLock = new object();
+        private const int MissionActivityLimit = 12;
+        private ListBox lstGpuEncoders;
+        private Label lblGpuStatus;
+        private Label lblGpuPreferredEncoder;
+        private Label lblAudioForgeSelection;
+        private ListView lvDeliveryMatrix;
 
         public Form1()
         {
@@ -81,6 +102,8 @@ namespace VideoConverter
             this.BackColor = Color.FromArgb(30, 30, 30);
 
             Directory.CreateDirectory(appDataDirectory);
+
+            LoadRecentMissionActivity();
 
             jobBindingList = new BindingList<ConversionJob>();
             navigationToolTip = new ToolTip
@@ -108,7 +131,8 @@ namespace VideoConverter
 
         private void CreateUI()
         {
-            this.Controls.Clear();
+            Controls.Clear();
+            navigationButtons.Clear();
 
             GradientPanel backdrop = new GradientPanel
             {
@@ -135,36 +159,16 @@ namespace VideoConverter
             Panel navigationPanel = CreateNavigationPanel();
             shellLayout.Controls.Add(navigationPanel, 0, 0);
 
-            TableLayoutPanel contentLayout = new TableLayoutPanel
+            mainContentHost = new Panel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 4,
-                BackColor = Color.Transparent
+                BackColor = Color.Transparent,
+                Padding = new Padding(0)
             };
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            shellLayout.Controls.Add(contentLayout, 1, 0);
+            shellLayout.Controls.Add(mainContentHost, 1, 0);
 
-            Panel heroSection = CreateHeroSection();
-            contentLayout.Controls.Add(heroSection, 0, 0);
-
-            Panel controlSuite = CreateControlSuite();
-            contentLayout.Controls.Add(controlSuite, 0, 1);
-
-            DataGridView dgvJobs = CreateJobsGrid();
-            contentLayout.Controls.Add(dgvJobs, 0, 2);
-
-            Panel statusBar = CreateStatusBar();
-            contentLayout.Controls.Add(statusBar, 0, 3);
-
-            ContextMenuStrip contextMenu = new ContextMenuStrip();
-            contextMenu.Items.Add("Remove Selected", null, (s, e) => RemoveSelectedJobs(dgvJobs));
-            contextMenu.Items.Add("Open Output Folder", null, (s, e) => OpenOutputFolder(dgvJobs));
-            contextMenu.Items.Add("Cancel Conversion", null, (s, e) => CancelSelectedJob(dgvJobs));
-            dgvJobs.ContextMenuStrip = contextMenu;
+            RegisterContentPages();
+            ShowPage("Mission Control");
         }
 
         #region Settings & Persistence
@@ -399,20 +403,25 @@ namespace VideoConverter
 
         private void LogJobEvent(ConversionJob job, string message)
         {
+            DateTime now = DateTime.Now;
+            string prefix = job != null ? job.FileName : "SYSTEM";
+            string fileLine = $"{now:O} | {prefix} | {message}";
+
             try
             {
                 Directory.CreateDirectory(appDataDirectory);
-                string prefix = job != null ? job.FileName : "SYSTEM";
-                string line = $"{DateTime.Now:O} | {prefix} | {message}";
                 lock (logLock)
                 {
-                    File.AppendAllText(jobHistoryPath, line + Environment.NewLine);
+                    File.AppendAllText(jobHistoryPath, fileLine + Environment.NewLine);
                 }
             }
             catch
             {
                 // Swallow logging failures; we don't want to interrupt conversions.
             }
+
+            string activityLine = $"{now:HH:mm:ss} | {prefix} | {message}";
+            AppendMissionLog(activityLine);
         }
 
         #endregion
@@ -471,11 +480,11 @@ namespace VideoConverter
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0)
             };
-            navButtons.Controls.Add(CreateNavButton("Mission Control", "🛰", "Return to the mission control overview"));
-            navButtons.Controls.Add(CreateNavButton("Batch Architect", "🧱", "Design massive conversion batches"));
-            navButtons.Controls.Add(CreateNavButton("GPU Flux", "⚡", "Monitor GPU-accelerated transcoding"));
-            navButtons.Controls.Add(CreateNavButton("Audio Forge", "🎚", "Craft multidimensional audio overlays"));
-            navButtons.Controls.Add(CreateNavButton("Delivery Matrix", "📦", "Distribute results across your network"));
+            navButtons.Controls.Add(CreateNavButton("Mission Control", "🛰", "Return to the mission control overview", "Mission Control"));
+            navButtons.Controls.Add(CreateNavButton("Batch Architect", "🧱", "Design massive conversion batches", "Batch Architect"));
+            navButtons.Controls.Add(CreateNavButton("GPU Flux", "⚡", "Monitor GPU-accelerated transcoding", "GPU Flux"));
+            navButtons.Controls.Add(CreateNavButton("Audio Forge", "🎚", "Craft multidimensional audio overlays", "Audio Forge"));
+            navButtons.Controls.Add(CreateNavButton("Delivery Matrix", "📦", "Distribute results across your network", "Delivery Matrix"));
             navLayout.Controls.Add(navButtons, 0, 2);
 
             FlowLayoutPanel navStatus = new FlowLayoutPanel
@@ -1334,6 +1343,7 @@ namespace VideoConverter
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft
             };
+            lblStatusControl = lblStatus;
             statusLayout.Controls.Add(lblStatus, 0, 0);
 
             FlowLayoutPanel statusBadges = new FlowLayoutPanel
@@ -1352,7 +1362,7 @@ namespace VideoConverter
             return statusBar;
         }
 
-        private Button CreateNavButton(string text, string emoji, string tooltip)
+        private Button CreateNavButton(string text, string emoji, string tooltip, string pageKey)
         {
             Button button = new Button
             {
@@ -1373,6 +1383,9 @@ namespace VideoConverter
             button.FlatAppearance.MouseDownBackColor = Color.FromArgb(40, 48, 76);
             button.FlatAppearance.MouseOverBackColor = Color.FromArgb(64, 84, 128);
             navigationToolTip?.SetToolTip(button, tooltip);
+            button.Tag = pageKey;
+            button.Click += NavButton_Click;
+            navigationButtons[pageKey] = button;
 
             button.Paint += (s, e) =>
             {
@@ -1381,6 +1394,1342 @@ namespace VideoConverter
             };
 
             return button;
+        }
+
+        private void NavButton_Click(object sender, EventArgs e)
+        {
+            if (sender is Button button && button.Tag is string pageKey)
+            {
+                ShowPage(pageKey, button);
+            }
+        }
+
+        private void ShowPage(string pageKey)
+        {
+            ShowPage(pageKey, null);
+        }
+
+        private void ShowPage(string pageKey, Button triggerButton)
+        {
+            if (!contentPages.TryGetValue(pageKey, out Control page) || mainContentHost == null)
+            {
+                return;
+            }
+
+            if (!mainContentHost.Controls.Contains(page))
+            {
+                mainContentHost.SuspendLayout();
+                mainContentHost.Controls.Clear();
+                page.Dock = DockStyle.Fill;
+                mainContentHost.Controls.Add(page);
+                mainContentHost.ResumeLayout();
+            }
+
+            if (triggerButton == null && navigationButtons.TryGetValue(pageKey, out Button navButton))
+            {
+                triggerButton = navButton;
+            }
+
+            if (triggerButton != null)
+            {
+                HighlightNavigationButton(triggerButton);
+            }
+        }
+
+        private void HighlightNavigationButton(Button button)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            if (activeNavButton != null && !activeNavButton.IsDisposed && !ReferenceEquals(activeNavButton, button))
+            {
+                activeNavButton.BackColor = Color.FromArgb(48, 56, 88);
+            }
+
+            activeNavButton = button;
+            activeNavButton.BackColor = Color.FromArgb(90, 110, 170);
+        }
+
+        private void RegisterContentPages()
+        {
+            contentPages.Clear();
+
+            Control missionPage = BuildMissionControlPage();
+            Control batchPage = BuildBatchArchitectPage();
+            Control gpuPage = BuildGpuFluxPage();
+            Control audioPage = BuildAudioForgePage();
+            Control deliveryPage = BuildDeliveryMatrixPage();
+
+            contentPages["Mission Control"] = missionPage;
+            contentPages["Batch Architect"] = batchPage;
+            contentPages["GPU Flux"] = gpuPage;
+            contentPages["Audio Forge"] = audioPage;
+            contentPages["Delivery Matrix"] = deliveryPage;
+
+            UpdateMissionMetrics();
+            RefreshGpuFluxUi();
+            RefreshAudioForgeUi();
+            RefreshDeliveryMatrix();
+            UpdateMissionActivityList();
+        }
+
+        private Control WrapInScroll(Control content)
+        {
+            Panel scrollPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                BackColor = Color.Transparent,
+                Padding = new Padding(0, 0, 6, 0)
+            };
+            content.Dock = DockStyle.Top;
+            content.Margin = new Padding(0);
+            scrollPanel.Controls.Add(content);
+            return scrollPanel;
+        }
+
+        private Control BuildMissionControlPage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            layout.Controls.Add(CreateMissionHeaderCard(), 0, 0);
+            layout.Controls.Add(CreateMissionTelemetryPanel(), 0, 1);
+            layout.Controls.Add(CreateMissionActivityPanel(), 0, 2);
+
+            return WrapInScroll(layout);
+        }
+
+        private Control CreateMissionHeaderCard()
+        {
+            GradientPanel headerCard = new GradientPanel
+            {
+                GradientStartColor = Color.FromArgb(70, 86, 140),
+                GradientEndColor = Color.FromArgb(28, 32, 56),
+                GradientMode = LinearGradientMode.ForwardDiagonal,
+                Padding = new Padding(28),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            headerCard.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(110, 140, 220), 1);
+                Rectangle rect = new Rectangle(0, 0, headerCard.Width - 1, headerCard.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel headerLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            headerCard.Controls.Add(headerLayout);
+
+            Label title = new Label
+            {
+                Text = "Mission Control",
+                Font = new Font("Segoe UI", 26, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            headerLayout.Controls.Add(title, 0, 0);
+
+            Label subtitle = new Label
+            {
+                Text = "Orchestrate your entire conversion fleet from a single bridge.",
+                Font = new Font("Segoe UI", 11, FontStyle.Regular),
+                ForeColor = Color.FromArgb(215, 225, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 16)
+            };
+            headerLayout.Controls.Add(subtitle, 0, 1);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+
+            Button btnLaunch = CreateStyledButton("🚀 Resume Queue", new Size(180, 46));
+            btnLaunch.BackColor = Color.FromArgb(0, 185, 120);
+            btnLaunch.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+            btnLaunch.Click += MissionResume_Click;
+
+            Button btnPause = CreateStyledButton("⏸ Pause Queue", new Size(170, 46));
+            btnPause.BackColor = Color.FromArgb(90, 96, 140);
+            btnPause.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+            btnPause.Click += MissionPause_Click;
+
+            Button btnArchitect = CreateStyledButton("🧱 Open Batch Architect", new Size(240, 46));
+            btnArchitect.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+            btnArchitect.Click += (s, e) => ShowPage("Batch Architect");
+
+            actions.Controls.Add(btnLaunch);
+            actions.Controls.Add(btnPause);
+            actions.Controls.Add(btnArchitect);
+            headerLayout.Controls.Add(actions, 0, 2);
+
+            return headerCard;
+        }
+
+        private Control CreateMissionTelemetryPanel()
+        {
+            Panel telemetryCard = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            telemetryCard.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, telemetryCard.Width - 1, telemetryCard.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel telemetryLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            telemetryLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            telemetryLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            telemetryLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            telemetryCard.Controls.Add(telemetryLayout);
+
+            Label title = new Label
+            {
+                Text = "Fleet Telemetry",
+                Font = new Font("Segoe UI", 16, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 12)
+            };
+            telemetryLayout.Controls.Add(title, 0, 0);
+
+            FlowLayoutPanel metricsRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true
+            };
+            metricsRow.Controls.Add(CreateMissionMetricCard("Queued Jobs", out lblMissionQueuedValue, Color.FromArgb(120, 200, 255)));
+            metricsRow.Controls.Add(CreateMissionMetricCard("Active Engines", out lblMissionActiveValue, Color.FromArgb(255, 180, 120)));
+            metricsRow.Controls.Add(CreateMissionMetricCard("Completed", out lblMissionCompletedValue, Color.FromArgb(120, 255, 190)));
+            metricsRow.Controls.Add(CreateMissionMetricCard("Failed", out lblMissionFailedValue, Color.FromArgb(255, 120, 140)));
+            telemetryLayout.Controls.Add(metricsRow, 0, 1);
+
+            FlowLayoutPanel statusRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            statusRow.Controls.Add(CreateMissionStatusCard("Auto Shutdown", out lblMissionAutoShutdownValue));
+            statusRow.Controls.Add(CreateMissionStatusCard("Parallel Engines", out lblMissionParallelValue));
+            statusRow.Controls.Add(CreateMissionStatusCard("FFmpeg", out lblMissionFfmpegValue));
+            telemetryLayout.Controls.Add(statusRow, 0, 2);
+
+            return telemetryCard;
+        }
+
+        private Control CreateMissionActivityPanel()
+        {
+            Panel activityCard = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Padding = new Padding(26),
+                Margin = new Padding(0),
+                AutoSize = true
+            };
+
+            activityCard.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, activityCard.Width - 1, activityCard.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            activityCard.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "Mission Activity Feed",
+                Font = new Font("Segoe UI", 16, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            lstMissionActivity = new ListBox
+            {
+                BackColor = Color.FromArgb(26, 30, 46),
+                ForeColor = Color.FromArgb(200, 210, 240),
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Consolas", 9, FontStyle.Regular),
+                HorizontalScrollbar = true,
+                IntegralHeight = false,
+                Dock = DockStyle.Fill
+            };
+
+            Panel listContainer = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 240,
+                Margin = new Padding(0, 16, 0, 0)
+            };
+            listContainer.Controls.Add(lstMissionActivity);
+            layout.Controls.Add(listContainer, 0, 1);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 16, 0, 0)
+            };
+
+            Button btnOpenHistory = CreateStyledButton("Open History Log", new Size(200, 40));
+            btnOpenHistory.Click += BtnOpenHistory_Click;
+
+            Button btnJumpDelivery = CreateStyledButton("Delivery Matrix", new Size(180, 40));
+            btnJumpDelivery.Click += (s, e) => ShowPage("Delivery Matrix");
+
+            actions.Controls.Add(btnOpenHistory);
+            actions.Controls.Add(btnJumpDelivery);
+            layout.Controls.Add(actions, 0, 2);
+
+            return activityCard;
+        }
+
+        private Control CreateMissionMetricCard(string labelText, out Label valueLabel, Color accentColor)
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(40, 44, 64),
+                Padding = new Padding(18),
+                Margin = new Padding(0, 0, 16, 16),
+                AutoSize = true
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                ColumnCount = 1,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Controls.Add(layout);
+
+            Label label = new Label
+            {
+                Text = labelText.ToUpperInvariant(),
+                Font = new Font("Segoe UI", 8, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 210, 240),
+                AutoSize = true
+            };
+            layout.Controls.Add(label, 0, 0);
+
+            valueLabel = new Label
+            {
+                Text = "0",
+                Font = new Font("Segoe UI", 26, FontStyle.Bold),
+                ForeColor = accentColor,
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(valueLabel, 0, 1);
+
+            return card;
+        }
+
+        private Control CreateMissionStatusCard(string labelText, out Label valueLabel)
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(36, 40, 58),
+                Padding = new Padding(16),
+                Margin = new Padding(0, 0, 16, 16),
+                AutoSize = true
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                ColumnCount = 1,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Controls.Add(layout);
+
+            Label label = new Label
+            {
+                Text = labelText,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(label, 0, 0);
+
+            valueLabel = new Label
+            {
+                Text = "-",
+                Font = new Font("Segoe UI", 11, FontStyle.Regular),
+                ForeColor = Color.FromArgb(190, 210, 245),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(valueLabel, 0, 1);
+
+            return card;
+        }
+
+        private Control BuildBatchArchitectPage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            layout.Controls.Add(CreateHeroSection(), 0, 0);
+
+            Panel controlSuite = CreateControlSuite();
+            layout.Controls.Add(controlSuite, 0, 1);
+
+            DataGridView dgvJobs = CreateJobsGrid();
+            ContextMenuStrip contextMenu = new ContextMenuStrip();
+            contextMenu.Items.Add("Remove Selected", null, (s, e) => RemoveSelectedJobs(dgvJobs));
+            contextMenu.Items.Add("Open Output Folder", null, (s, e) => OpenOutputFolder(dgvJobs));
+            contextMenu.Items.Add("Cancel Conversion", null, (s, e) => CancelSelectedJob(dgvJobs));
+            dgvJobs.ContextMenuStrip = contextMenu;
+            layout.Controls.Add(dgvJobs, 0, 2);
+
+            Panel statusBar = CreateStatusBar();
+            layout.Controls.Add(statusBar, 0, 3);
+
+            return WrapInScroll(layout);
+        }
+
+        private Control BuildGpuFluxPage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            layout.Controls.Add(CreateGpuFluxHeader(), 0, 0);
+            layout.Controls.Add(CreateGpuFluxPanel(), 0, 1);
+
+            return WrapInScroll(layout);
+        }
+
+        private Control CreateGpuFluxHeader()
+        {
+            GradientPanel header = new GradientPanel
+            {
+                GradientStartColor = Color.FromArgb(60, 82, 140),
+                GradientEndColor = Color.FromArgb(24, 30, 52),
+                GradientMode = LinearGradientMode.Horizontal,
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            header.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(100, 130, 200), 1);
+                Rectangle rect = new Rectangle(0, 0, header.Width - 1, header.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            header.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "GPU Flux Monitor",
+                Font = new Font("Segoe UI", 24, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            Label subtitle = new Label
+            {
+                Text = "Inspect and tune the hardware engines powering accelerated transcodes.",
+                Font = new Font("Segoe UI", 10, FontStyle.Regular),
+                ForeColor = Color.FromArgb(210, 220, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(subtitle, 0, 1);
+
+            return header;
+        }
+
+        private Control CreateGpuFluxPanel()
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "Hardware Encoders",
+                Font = new Font("Segoe UI", 16, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            lblGpuStatus = new Label
+            {
+                Text = "Detecting hardware...",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(140, 220, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 10, 0, 10)
+            };
+            layout.Controls.Add(lblGpuStatus, 0, 1);
+
+            lstGpuEncoders = new ListBox
+            {
+                BackColor = Color.FromArgb(26, 30, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                IntegralHeight = false,
+                Height = 200,
+                Width = 420
+            };
+            layout.Controls.Add(lstGpuEncoders, 0, 2);
+
+            lblGpuPreferredEncoder = new Label
+            {
+                Text = "Preferred Encoder: -",
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(200, 210, 240),
+                AutoSize = true,
+                Margin = new Padding(0, 12, 0, 6)
+            };
+            layout.Controls.Add(lblGpuPreferredEncoder, 0, 3);
+
+            FlowLayoutPanel buttonsRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+
+            Button btnRescan = CreateStyledButton("Rescan Hardware", new Size(200, 42));
+            btnRescan.Click += BtnRescanGpu_Click;
+
+            Button btnSetPreferred = CreateStyledButton("Set Preferred Encoder", new Size(230, 42));
+            btnSetPreferred.Click += BtnSetPreferredEncoder_Click;
+
+            buttonsRow.Controls.Add(btnRescan);
+            buttonsRow.Controls.Add(btnSetPreferred);
+            layout.Controls.Add(buttonsRow, 0, 4);
+
+            return card;
+        }
+
+        private Control BuildAudioForgePage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            layout.Controls.Add(CreateAudioForgeHeader(), 0, 0);
+            layout.Controls.Add(CreateAudioForgePanel(), 0, 1);
+
+            return WrapInScroll(layout);
+        }
+
+        private Control CreateAudioForgeHeader()
+        {
+            GradientPanel header = new GradientPanel
+            {
+                GradientStartColor = Color.FromArgb(86, 72, 140),
+                GradientEndColor = Color.FromArgb(30, 26, 52),
+                GradientMode = LinearGradientMode.Horizontal,
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            header.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(130, 110, 200), 1);
+                Rectangle rect = new Rectangle(0, 0, header.Width - 1, header.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            header.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "Audio Forge Studio",
+                Font = new Font("Segoe UI", 24, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            Label subtitle = new Label
+            {
+                Text = "Layer ambience, commentary, and sonic signatures onto any timeline.",
+                Font = new Font("Segoe UI", 10, FontStyle.Regular),
+                ForeColor = Color.FromArgb(215, 220, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(subtitle, 0, 1);
+
+            return header;
+        }
+
+        private Control CreateAudioForgePanel()
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Controls.Add(layout);
+
+            Label instructions = new Label
+            {
+                Text = "Select an overlay track to merge with your conversions or flip into audio-only mode.",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(instructions, 0, 0);
+
+            FlowLayoutPanel buttonRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 16, 0, 0)
+            };
+
+            Button btnSelectOverlay = CreateStyledButton("🎵 Select Overlay", new Size(200, 44));
+            btnSelectOverlay.Click += BtnAudioOverlay_Click;
+
+            Button btnClearOverlay = CreateStyledButton("🧹 Clear Overlay", new Size(180, 44));
+            btnClearOverlay.Click += (s, e) => ClearAudioOverlaySelection();
+
+            Button btnToggleAudioOnly = CreateStyledButton("🎚 Toggle Audio-Only Mode", new Size(250, 44));
+            btnToggleAudioOnly.Click += (s, e) =>
+            {
+                if (chkAudioOnlyControl != null)
+                {
+                    chkAudioOnlyControl.Checked = !chkAudioOnlyControl.Checked;
+                }
+            };
+
+            buttonRow.Controls.Add(btnSelectOverlay);
+            buttonRow.Controls.Add(btnClearOverlay);
+            buttonRow.Controls.Add(btnToggleAudioOnly);
+            layout.Controls.Add(buttonRow, 0, 1);
+
+            lblAudioForgeSelection = new Label
+            {
+                Text = "No audio overlay selected.",
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.FromArgb(170, 180, 210),
+                AutoSize = true,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            layout.Controls.Add(lblAudioForgeSelection, 0, 2);
+
+            FlowLayoutPanel tipsRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            tipsRow.Controls.Add(CreateBadge("Supports MP3/WAV/AAC/FLAC/OGG", Color.FromArgb(255, 200, 140), Color.Black, Color.FromArgb(255, 230, 190)));
+            tipsRow.Controls.Add(CreateBadge("Auto mix balances overlay with source", Color.FromArgb(140, 220, 255), Color.Black, Color.FromArgb(200, 240, 255)));
+            layout.Controls.Add(tipsRow, 0, 3);
+
+            return card;
+        }
+
+        private Control BuildDeliveryMatrixPage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            layout.Controls.Add(CreateDeliveryMatrixHeader(), 0, 0);
+            layout.Controls.Add(CreateDeliveryMatrixPanel(), 0, 1);
+
+            return WrapInScroll(layout);
+        }
+
+        private Control CreateDeliveryMatrixHeader()
+        {
+            GradientPanel header = new GradientPanel
+            {
+                GradientStartColor = Color.FromArgb(74, 104, 140),
+                GradientEndColor = Color.FromArgb(24, 30, 44),
+                GradientMode = LinearGradientMode.Horizontal,
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            header.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(120, 150, 210), 1);
+                Rectangle rect = new Rectangle(0, 0, header.Width - 1, header.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            header.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "Delivery Matrix",
+                Font = new Font("Segoe UI", 24, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            Label subtitle = new Label
+            {
+                Text = "Track outputs, reveal files, and distribute the finished payloads across your network.",
+                Font = new Font("Segoe UI", 10, FontStyle.Regular),
+                ForeColor = Color.FromArgb(215, 225, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            layout.Controls.Add(subtitle, 0, 1);
+
+            return header;
+        }
+
+        private Control CreateDeliveryMatrixPanel()
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24),
+                AutoSize = true
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                BackColor = Color.Transparent
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            card.Controls.Add(layout);
+
+            Label title = new Label
+            {
+                Text = "Queue Manifest",
+                Font = new Font("Segoe UI", 16, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            layout.Controls.Add(title, 0, 0);
+
+            Panel listContainer = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 320,
+                Margin = new Padding(0, 16, 0, 16)
+            };
+
+            lvDeliveryMatrix = new ListView
+            {
+                View = View.Details,
+                FullRowSelect = true,
+                HideSelection = false,
+                MultiSelect = false,
+                BackColor = Color.FromArgb(26, 30, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.None,
+                Dock = DockStyle.Fill
+            };
+            lvDeliveryMatrix.Columns.Add("File", 240);
+            lvDeliveryMatrix.Columns.Add("Status", 140);
+            lvDeliveryMatrix.Columns.Add("Output", 420);
+            listContainer.Controls.Add(lvDeliveryMatrix);
+            layout.Controls.Add(listContainer, 0, 1);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+
+            Button btnOpenSelected = CreateStyledButton("📂 Open Selected Output", new Size(230, 44));
+            btnOpenSelected.Click += BtnDeliveryOpenSelected_Click;
+
+            Button btnRevealVault = CreateStyledButton("📁 Reveal Output Vault", new Size(220, 44));
+            btnRevealVault.Click += BtnRevealVault_Click;
+
+            Button btnJumpMission = CreateStyledButton("🛰 Back to Mission Control", new Size(260, 44));
+            btnJumpMission.Click += (s, e) => ShowPage("Mission Control");
+
+            actions.Controls.Add(btnOpenSelected);
+            actions.Controls.Add(btnRevealVault);
+            actions.Controls.Add(btnJumpMission);
+            layout.Controls.Add(actions, 0, 2);
+
+            return card;
+        }
+
+        private void MissionResume_Click(object sender, EventArgs e)
+        {
+            BtnStartConversion_Click(sender, EventArgs.Empty);
+            ShowPage("Batch Architect");
+        }
+
+        private void MissionPause_Click(object sender, EventArgs e)
+        {
+            if (!queueProcessingActive)
+            {
+                return;
+            }
+
+            queueProcessingActive = false;
+            SaveSettings();
+            LogJobEvent(null, "Queue processing paused from Mission Control.");
+            UpdateStatusBar();
+        }
+
+        private void BtnOpenHistory_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                if (!File.Exists(jobHistoryPath))
+                {
+                    MessageBox.Show("No history has been recorded yet.", "Mission Control", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = jobHistoryPath,
+                    UseShellExecute = true
+                };
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Unable to open history log: {ex.Message}", "Mission Control", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void BtnRescanGpu_Click(object sender, EventArgs e)
+        {
+            CheckFFmpegAvailability();
+            RefreshGpuFluxUi();
+        }
+
+        private void BtnSetPreferredEncoder_Click(object sender, EventArgs e)
+        {
+            if (lstGpuEncoders?.SelectedItem is string encoder)
+            {
+                preferredHardwareEncoder = encoder;
+                hardwareAccelerationArgs = ResolveHardwareAccelerationArgs(encoder);
+                LogJobEvent(null, $"Preferred GPU encoder set to {encoder}.");
+                UpdateGpuToggleAvailability();
+                RefreshGpuFluxUi();
+            }
+            else
+            {
+                MessageBox.Show("Select an encoder from the list first.", "GPU Flux", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void BtnDeliveryOpenSelected_Click(object sender, EventArgs e)
+        {
+            if (lvDeliveryMatrix?.SelectedItems.Count > 0)
+            {
+                if (lvDeliveryMatrix.SelectedItems[0].Tag is ConversionJob job)
+                {
+                    OpenJobOutput(job);
+                }
+            }
+        }
+
+        private void BtnRevealVault_Click(object sender, EventArgs e)
+        {
+            string path = txtOutputPathControl?.Text;
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            {
+                MessageBox.Show("The configured output folder does not exist.", "Delivery Matrix", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to open output folder: {ex.Message}", "Delivery Matrix", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void ClearAudioOverlaySelection()
+        {
+            if (lblAudioFileControl != null)
+            {
+                lblAudioFileControl.Text = "No audio overlay selected";
+                lblAudioFileControl.Tag = null;
+                lblAudioFileControl.ForeColor = Color.FromArgb(170, 180, 210);
+            }
+
+            RefreshAudioForgeUi();
+        }
+
+        private void LoadRecentMissionActivity()
+        {
+            try
+            {
+                if (File.Exists(jobHistoryPath))
+                {
+                    var lines = File.ReadLines(jobHistoryPath).TakeLast(MissionActivityLimit).ToList();
+                    lock (missionActivityLock)
+                    {
+                        missionActivityBuffer.Clear();
+                        foreach (string line in lines)
+                        {
+                            missionActivityBuffer.Enqueue(line);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore history load failures
+            }
+        }
+
+        private void AppendMissionLog(string line)
+        {
+            lock (missionActivityLock)
+            {
+                missionActivityBuffer.Enqueue(line);
+                while (missionActivityBuffer.Count > MissionActivityLimit)
+                {
+                    missionActivityBuffer.Dequeue();
+                }
+            }
+
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)UpdateMissionActivityList);
+            }
+            else
+            {
+                UpdateMissionActivityList();
+            }
+        }
+
+        private void UpdateMissionActivityList()
+        {
+            if (lstMissionActivity == null || lstMissionActivity.IsDisposed)
+            {
+                return;
+            }
+
+            lock (missionActivityLock)
+            {
+                lstMissionActivity.BeginUpdate();
+                lstMissionActivity.Items.Clear();
+                foreach (string entry in missionActivityBuffer.Reverse())
+                {
+                    lstMissionActivity.Items.Add(entry);
+                }
+                lstMissionActivity.EndUpdate();
+            }
+        }
+
+        private void UpdateMissionMetrics()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)UpdateMissionMetrics);
+                return;
+            }
+
+            int queuedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Queued);
+            int activeCount = conversionQueue.Count(j => j.Status == ConversionStatus.Converting);
+            int completedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Completed);
+            int failedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Failed);
+
+            if (lblMissionQueuedValue != null && !lblMissionQueuedValue.IsDisposed)
+            {
+                lblMissionQueuedValue.Text = queuedCount.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (lblMissionActiveValue != null && !lblMissionActiveValue.IsDisposed)
+            {
+                lblMissionActiveValue.Text = activeCount.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (lblMissionCompletedValue != null && !lblMissionCompletedValue.IsDisposed)
+            {
+                lblMissionCompletedValue.Text = completedCount.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (lblMissionFailedValue != null && !lblMissionFailedValue.IsDisposed)
+            {
+                lblMissionFailedValue.Text = failedCount.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (lblMissionAutoShutdownValue != null && !lblMissionAutoShutdownValue.IsDisposed)
+            {
+                lblMissionAutoShutdownValue.Text = autoShutdownEnabled
+                    ? (shutdownScheduled ? "Countdown Armed" : "Ready")
+                    : "Disabled";
+            }
+
+            if (lblMissionParallelValue != null && !lblMissionParallelValue.IsDisposed)
+            {
+                lblMissionParallelValue.Text = $"{activeConversions}/{maxConcurrentConversions}";
+            }
+
+            if (lblMissionFfmpegValue != null && !lblMissionFfmpegValue.IsDisposed)
+            {
+                lblMissionFfmpegValue.Text = ffmpegAvailable
+                    ? $"Online ({Path.GetFileName(ffmpegPath)})"
+                    : "Not Detected";
+            }
+        }
+
+        private void RefreshGpuFluxUi()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)RefreshGpuFluxUi);
+                return;
+            }
+
+            if (lblGpuStatus != null && !lblGpuStatus.IsDisposed)
+            {
+                lblGpuStatus.Text = ffmpegAvailable
+                    ? $"FFmpeg online • {availableHardwareEncoders.Count} hardware encoder(s) detected"
+                    : "FFmpeg not detected. Install or configure ffmpeg to enable GPU acceleration.";
+                lblGpuStatus.ForeColor = ffmpegAvailable ? Color.FromArgb(140, 220, 255) : Color.FromArgb(255, 150, 150);
+            }
+
+            if (lstGpuEncoders != null && !lstGpuEncoders.IsDisposed)
+            {
+                lstGpuEncoders.BeginUpdate();
+                lstGpuEncoders.Items.Clear();
+                if (availableHardwareEncoders.Count == 0)
+                {
+                    lstGpuEncoders.Items.Add("No hardware encoders detected");
+                }
+                else
+                {
+                    foreach (string encoder in availableHardwareEncoders)
+                    {
+                        lstGpuEncoders.Items.Add(encoder);
+                    }
+                }
+                lstGpuEncoders.EndUpdate();
+            }
+
+            if (lblGpuPreferredEncoder != null && !lblGpuPreferredEncoder.IsDisposed)
+            {
+                lblGpuPreferredEncoder.Text = string.IsNullOrEmpty(preferredHardwareEncoder)
+                    ? "Preferred Encoder: (none)"
+                    : $"Preferred Encoder: {preferredHardwareEncoder}";
+            }
+        }
+
+        private void RefreshAudioForgeUi()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)RefreshAudioForgeUi);
+                return;
+            }
+
+            if (lblAudioForgeSelection != null && !lblAudioForgeSelection.IsDisposed)
+            {
+                string overlayPath = lblAudioFileControl?.Tag as string;
+                if (string.IsNullOrWhiteSpace(overlayPath))
+                {
+                    lblAudioForgeSelection.Text = "No audio overlay selected.";
+                    lblAudioForgeSelection.ForeColor = Color.FromArgb(170, 180, 210);
+                }
+                else
+                {
+                    lblAudioForgeSelection.Text = overlayPath;
+                    lblAudioForgeSelection.ForeColor = Color.FromArgb(140, 220, 255);
+                }
+            }
+        }
+
+        private void RefreshDeliveryMatrix()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)RefreshDeliveryMatrix);
+                return;
+            }
+
+            if (lvDeliveryMatrix == null || lvDeliveryMatrix.IsDisposed)
+            {
+                return;
+            }
+
+            lvDeliveryMatrix.BeginUpdate();
+            lvDeliveryMatrix.Items.Clear();
+            foreach (var job in conversionQueue.OrderByDescending(j => j.StartTime ?? DateTime.MinValue))
+            {
+                string outputDisplay = !string.IsNullOrWhiteSpace(job.OutputPath) ? job.OutputPath : job.OutputDirectory;
+                ListViewItem item = new ListViewItem(job.FileName ?? "(unknown)")
+                {
+                    Tag = job
+                };
+                item.SubItems.Add(job.StatusText);
+                item.SubItems.Add(string.IsNullOrWhiteSpace(outputDisplay) ? "-" : outputDisplay);
+                lvDeliveryMatrix.Items.Add(item);
+            }
+            lvDeliveryMatrix.EndUpdate();
+        }
+
+        private void OpenJobOutput(ConversionJob job)
+        {
+            if (job == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(job.OutputPath) && File.Exists(job.OutputPath))
+                {
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{job.OutputPath}\"")
+                        {
+                            UseShellExecute = false
+                        });
+                    }
+                    else
+                    {
+                        Process.Start(new ProcessStartInfo
+                        {
+                            FileName = job.OutputPath,
+                            UseShellExecute = true
+                        });
+                    }
+                    return;
+                }
+
+                if (!string.IsNullOrWhiteSpace(job.OutputDirectory) && Directory.Exists(job.OutputDirectory))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = job.OutputDirectory,
+                        UseShellExecute = true
+                    });
+                    return;
+                }
+
+                MessageBox.Show("The output location could not be found.", "Delivery Matrix", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to open output location: {ex.Message}", "Delivery Matrix", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private Label CreateBadge(string text, Color borderColor, Color textColor, Color backColor)
@@ -1600,6 +2949,8 @@ namespace VideoConverter
                         lblAudioFileControl.Tag = ofd.FileName;
                         lblAudioFileControl.ForeColor = Color.FromArgb(100, 200, 100);
                     }
+
+                    RefreshAudioForgeUi();
                 }
             }
         }
@@ -1834,14 +3185,7 @@ namespace VideoConverter
             if (dgv.SelectedRows.Count > 0)
             {
                 var job = dgv.SelectedRows[0].DataBoundItem as ConversionJob;
-                if (job != null && File.Exists(job.OutputPath))
-                {
-                    Process.Start("explorer.exe", $"/select,\"{job.OutputPath}\"");
-                }
-                else if (job != null && Directory.Exists(job.OutputDirectory))
-                {
-                    Process.Start("explorer.exe", job.OutputDirectory);
-                }
+                OpenJobOutput(job);
             }
         }
 
@@ -2524,12 +3868,14 @@ namespace VideoConverter
                 preferredHardwareEncoder = null;
                 hardwareAccelerationArgs = string.Empty;
                 UpdateGpuToggleAvailability();
+                RefreshGpuFluxUi();
                 return;
             }
 
             DetectHardwareEncoders();
             UpdateGpuToggleAvailability();
             ConfigureAudioOnlyMode(chkAudioOnlyControl?.Checked ?? false);
+            RefreshGpuFluxUi();
         }
 
         private bool ResolveFfmpegPath()
@@ -2702,16 +4048,18 @@ namespace VideoConverter
                 return;
             }
 
-            Label lblStatus = Controls.Find("lblStatus", true).FirstOrDefault() as Label;
-            if (lblStatus != null)
+            if (lblStatusControl != null && !lblStatusControl.IsDisposed)
             {
                 int queuedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Queued);
                 int completedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Completed);
                 int failedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Failed);
 
-                lblStatus.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{maxConcurrentConversions} | " +
-                                 $"Completed: {completedCount} | Failed: {failedCount}";
+                lblStatusControl.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{maxConcurrentConversions} | " +
+                                        $"Completed: {completedCount} | Failed: {failedCount}";
             }
+
+            UpdateMissionMetrics();
+            RefreshDeliveryMatrix();
         }
 
         private void Form1_HandleCreatedForStatusBar(object sender, EventArgs e)
