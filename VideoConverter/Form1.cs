@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -17,6 +18,7 @@ namespace VideoConverter
     {
         private List<ConversionJob> conversionQueue = new List<ConversionJob>();
         private BindingList<ConversionJob> jobBindingList;
+        private ToolTip navigationToolTip;
         private const int MAX_CONCURRENT_CONVERSIONS = 3;
         private int activeConversions = 0;
         private string ffmpegPath = "ffmpeg.exe"; // Ensure FFmpeg is in the same directory or PATH
@@ -33,11 +35,21 @@ namespace VideoConverter
             this.Size = new Size(1400, 900);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.AllowDrop = true;
+            this.DoubleBuffered = true;
             this.DragEnter += Form1_DragEnter;
             this.DragDrop += Form1_DragDrop;
             this.BackColor = Color.FromArgb(30, 30, 30);
 
             jobBindingList = new BindingList<ConversionJob>();
+            navigationToolTip = new ToolTip
+            {
+                AutomaticDelay = 50,
+                AutoPopDelay = 8000,
+                InitialDelay = 50,
+                ReshowDelay = 10,
+                BackColor = Color.FromArgb(32, 36, 48),
+                ForeColor = Color.White
+            };
 
             CreateUI();
             CheckFFmpegAvailability();
@@ -45,146 +57,374 @@ namespace VideoConverter
 
         private void CreateUI()
         {
-            // Main Container Panel
-            Panel mainPanel = new Panel
+            this.Controls.Clear();
+
+            GradientPanel backdrop = new GradientPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(20),
-                BackColor = Color.FromArgb(30, 30, 30)
+                GradientStartColor = Color.FromArgb(22, 27, 40),
+                GradientEndColor = Color.FromArgb(10, 14, 24),
+                GradientMode = LinearGradientMode.ForwardDiagonal,
+                Padding = new Padding(28)
             };
-            this.Controls.Add(mainPanel);
+            Controls.Add(backdrop);
 
-            // Title Label
-            Label titleLabel = new Label
+            TableLayoutPanel shellLayout = new TableLayoutPanel
             {
-                Text = "🎬 Hills Video Converter Pro",
-                Font = new Font("Segoe UI", 24, FontStyle.Bold),
-                ForeColor = Color.FromArgb(0, 150, 255),
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent
+            };
+            shellLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 260F));
+            shellLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            shellLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            backdrop.Controls.Add(shellLayout);
+
+            Panel navigationPanel = CreateNavigationPanel();
+            shellLayout.Controls.Add(navigationPanel, 0, 0);
+
+            TableLayoutPanel contentLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                BackColor = Color.Transparent
+            };
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            contentLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            shellLayout.Controls.Add(contentLayout, 1, 0);
+
+            Panel heroSection = CreateHeroSection();
+            contentLayout.Controls.Add(heroSection, 0, 0);
+
+            Panel controlSuite = CreateControlSuite();
+            contentLayout.Controls.Add(controlSuite, 0, 1);
+
+            DataGridView dgvJobs = CreateJobsGrid();
+            contentLayout.Controls.Add(dgvJobs, 0, 2);
+
+            Panel statusBar = CreateStatusBar();
+            contentLayout.Controls.Add(statusBar, 0, 3);
+
+            ContextMenuStrip contextMenu = new ContextMenuStrip();
+            contextMenu.Items.Add("Remove Selected", null, (s, e) => RemoveSelectedJobs(dgvJobs));
+            contextMenu.Items.Add("Open Output Folder", null, (s, e) => OpenOutputFolder(dgvJobs));
+            contextMenu.Items.Add("Cancel Conversion", null, (s, e) => CancelSelectedJob(dgvJobs));
+            dgvJobs.ContextMenuStrip = contextMenu;
+        }
+
+        private Panel CreateNavigationPanel()
+        {
+            GradientPanel navPanel = new GradientPanel
+            {
+                Dock = DockStyle.Fill,
+                GradientStartColor = Color.FromArgb(52, 60, 104),
+                GradientEndColor = Color.FromArgb(26, 28, 44),
+                GradientMode = LinearGradientMode.Vertical,
+                Padding = new Padding(24),
+                Margin = new Padding(0, 0, 24, 0)
+            };
+
+            TableLayoutPanel navLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 5,
+                BackColor = Color.Transparent
+            };
+            navLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            navLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            navLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            navLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            navLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            navPanel.Controls.Add(navLayout);
+
+            Label brandLabel = new Label
+            {
+                Text = "HILLS STUDIO\nINFINITE ENGINE",
+                Font = new Font("Segoe UI", 18, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            navLayout.Controls.Add(brandLabel, 0, 0);
+
+            Label versionLabel = new Label
+            {
+                Text = "Quantum Conversion Deck v5.0",
+                Font = new Font("Segoe UI", 9, FontStyle.Italic),
+                ForeColor = Color.FromArgb(180, 200, 255),
                 AutoSize = true,
-                Location = new Point(20, 10)
+                Margin = new Padding(0, 6, 0, 16)
             };
-            mainPanel.Controls.Add(titleLabel);
+            navLayout.Controls.Add(versionLabel, 0, 1);
 
-            // Subtitle
-            Label subtitleLabel = new Label
+            FlowLayoutPanel navButtons = new FlowLayoutPanel
             {
-                Text = "Advanced Multi-Format Video Conversion Engine | Supports Files Over 25GB",
-                Font = new Font("Segoe UI", 10, FontStyle.Italic),
-                ForeColor = Color.FromArgb(150, 150, 150),
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Dock = DockStyle.Fill,
                 AutoSize = true,
-                Location = new Point(25, 50)
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
             };
-            mainPanel.Controls.Add(subtitleLabel);
+            navButtons.Controls.Add(CreateNavButton("Mission Control", "🛰", "Return to the mission control overview"));
+            navButtons.Controls.Add(CreateNavButton("Batch Architect", "🧱", "Design massive conversion batches"));
+            navButtons.Controls.Add(CreateNavButton("GPU Flux", "⚡", "Monitor GPU-accelerated transcoding"));
+            navButtons.Controls.Add(CreateNavButton("Audio Forge", "🎚", "Craft multidimensional audio overlays"));
+            navButtons.Controls.Add(CreateNavButton("Delivery Matrix", "📦", "Distribute results across your network"));
+            navLayout.Controls.Add(navButtons, 0, 2);
 
-            // Top Control Panel
-            Panel controlPanel = new Panel
+            FlowLayoutPanel navStatus = new FlowLayoutPanel
             {
-                Location = new Point(20, 85),
-                Size = new Size(1340, 180),
-                BackColor = Color.FromArgb(45, 45, 48),
-                BorderStyle = BorderStyle.FixedSingle
+                FlowDirection = FlowDirection.TopDown,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0)
             };
-            mainPanel.Controls.Add(controlPanel);
+            navStatus.Controls.Add(CreateBadge("Latency: 2.4ms", Color.FromArgb(80, 130, 255), Color.White, Color.FromArgb(45, 55, 90)));
+            navStatus.Controls.Add(CreateBadge("Thermals Stable", Color.FromArgb(90, 200, 140), Color.White, Color.FromArgb(36, 68, 56)));
+            navStatus.Controls.Add(CreateBadge("Quantum Core Armed", Color.FromArgb(200, 120, 255), Color.White, Color.FromArgb(60, 40, 80)));
+            navLayout.Controls.Add(navStatus, 0, 3);
 
-            // Add Input Files Button
-            Button btnAddFiles = CreateStyledButton("📁 Add Files", new Point(15, 15), new Size(180, 45));
+            Label navFooter = new Label
+            {
+                Text = "Hyperlane ready • Synced across 12 workstations",
+                Font = new Font("Segoe UI", 8, FontStyle.Regular),
+                ForeColor = Color.FromArgb(190, 200, 230),
+                AutoSize = true,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            navLayout.Controls.Add(navFooter, 0, 4);
+
+            return navPanel;
+        }
+
+        private Panel CreateHeroSection()
+        {
+            GradientPanel heroCard = new GradientPanel
+            {
+                GradientStartColor = Color.FromArgb(70, 86, 140),
+                GradientEndColor = Color.FromArgb(30, 36, 60),
+                GradientMode = LinearGradientMode.Horizontal,
+                Dock = DockStyle.Fill,
+                Padding = new Padding(28, 28, 28, 32),
+                Margin = new Padding(0, 0, 0, 24)
+            };
+
+            heroCard.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(110, 140, 220), 1);
+                Rectangle rect = new Rectangle(0, 0, heroCard.Width - 1, heroCard.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel heroLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                BackColor = Color.Transparent
+            };
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            heroLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            heroCard.Controls.Add(heroLayout);
+
+            Label heroTitle = new Label
+            {
+                Text = "Ascend every frame to mythic quality",
+                Font = new Font("Segoe UI", 26, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true
+            };
+            heroLayout.Controls.Add(heroTitle, 0, 0);
+
+            Label heroSubtitle = new Label
+            {
+                Text = "Multithreaded, GPU-forged conversions with adaptive bitrate alchemy and AI-driven scene detection.",
+                Font = new Font("Segoe UI", 11, FontStyle.Regular),
+                ForeColor = Color.FromArgb(215, 225, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 8, 0, 16)
+            };
+            heroLayout.Controls.Add(heroSubtitle, 0, 1);
+
+            FlowLayoutPanel heroBadges = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                Margin = new Padding(0, 0, 0, 18)
+            };
+            heroBadges.Controls.Add(CreateBadge("AI Upscale ×8", Color.FromArgb(255, 200, 90), Color.Black, Color.FromArgb(255, 220, 140)));
+            heroBadges.Controls.Add(CreateBadge("HDR10 Metadata", Color.FromArgb(120, 200, 255), Color.Black, Color.FromArgb(200, 240, 255)));
+            heroBadges.Controls.Add(CreateBadge("Dolby Atmos Ready", Color.FromArgb(140, 255, 200), Color.Black, Color.FromArgb(215, 255, 235)));
+            heroBadges.Controls.Add(CreateBadge("Neural Noise Cancel", Color.FromArgb(180, 160, 255), Color.Black, Color.FromArgb(230, 220, 255)));
+            heroLayout.Controls.Add(heroBadges, 0, 2);
+
+            TableLayoutPanel metricsLayout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Fill,
+                AutoSize = true
+            };
+            metricsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            metricsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            metricsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            metricsLayout.Controls.Add(CreateMetricCard("Active Engines", "03", "Simultaneous conversions"), 0, 0);
+            metricsLayout.Controls.Add(CreateMetricCard("Throughput", "8.4×", "GPU vs CPU acceleration"), 1, 0);
+            metricsLayout.Controls.Add(CreateMetricCard("Quantum Presets", "12", "Studio-crafted templates"), 2, 0);
+            heroLayout.Controls.Add(metricsLayout, 0, 3);
+
+            return heroCard;
+        }
+
+        private Panel CreateControlSuite()
+        {
+            Panel controlCard = new Panel
+            {
+                BackColor = Color.FromArgb(32, 36, 52),
+                Dock = DockStyle.Fill,
+                Padding = new Padding(26),
+                Margin = new Padding(0, 0, 0, 24)
+            };
+
+            controlCard.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(70, 90, 140), 1);
+                Rectangle rect = new Rectangle(0, 0, controlCard.Width - 1, controlCard.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                BackColor = Color.Transparent
+            };
+            layout.RowCount = 7;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            controlCard.Controls.Add(layout);
+
+            Label header = new Label
+            {
+                Text = "Conversion Architecture",
+                Font = new Font("Segoe UI", 16, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true,
+                Margin = new Padding(0, 0, 0, 16)
+            };
+            layout.Controls.Add(header, 0, 0);
+
+            FlowLayoutPanel buttonRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                Margin = new Padding(0)
+            };
+
+            Button btnAddFiles = CreateStyledButton("📁 Add Files", new Size(190, 48));
             btnAddFiles.Click += BtnAddFiles_Click;
-            controlPanel.Controls.Add(btnAddFiles);
-
-            // Add Folder Button
-            Button btnAddFolder = CreateStyledButton("📂 Add Folder", new Point(205, 15), new Size(180, 45));
+            Button btnAddFolder = CreateStyledButton("📂 Ingest Folder", new Size(200, 48));
             btnAddFolder.Click += BtnAddFolder_Click;
-            controlPanel.Controls.Add(btnAddFolder);
-
-            // Clear Queue Button
-            Button btnClearQueue = CreateStyledButton("🗑️ Clear Queue", new Point(395, 15), new Size(180, 45));
+            Button btnClearQueue = CreateStyledButton("🧹 Purge Queue", new Size(190, 48));
             btnClearQueue.Click += (s, e) => ClearQueue();
-            controlPanel.Controls.Add(btnClearQueue);
 
-            // Drag and Drop Label
+            buttonRow.Controls.Add(btnAddFiles);
+            buttonRow.Controls.Add(btnAddFolder);
+            buttonRow.Controls.Add(btnClearQueue);
+            layout.Controls.Add(buttonRow, 0, 1);
+
             Label lblDragDrop = new Label
             {
-                Text = "⬇️ DRAG & DROP FILES HERE",
-                Font = new Font("Segoe UI", 16, FontStyle.Bold),
-                ForeColor = Color.FromArgb(100, 200, 100),
-                Location = new Point(600, 20),
-                Size = new Size(400, 35),
-                TextAlign = ContentAlignment.MiddleCenter
+                Text = "Drag galaxies of media right here ⬇️",
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                ForeColor = Color.FromArgb(140, 220, 255),
+                AutoSize = true,
+                Margin = new Padding(0, 14, 0, 16)
             };
-            controlPanel.Controls.Add(lblDragDrop);
-
-            // Output Format
-            Label lblFormat = CreateStyledLabel("Output Format:", new Point(15, 75));
-            controlPanel.Controls.Add(lblFormat);
+            layout.Controls.Add(lblDragDrop, 0, 2);
 
             ComboBox cmbFormat = new ComboBox
             {
                 Name = "cmbFormat",
-                Location = new Point(150, 72),
-                Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(60, 60, 60),
+                BackColor = Color.FromArgb(45, 50, 72),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10)
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 170
             };
             cmbFormat.Items.AddRange(new string[] { "MP4", "AVI", "MKV", "MOV", "WMV", "FLV", "WEBM", "MP3", "AAC", "WAV", "FLAC", "OGG" });
             cmbFormat.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbFormat);
-
-            // Resolution
-            Label lblResolution = CreateStyledLabel("Resolution:", new Point(320, 75));
-            controlPanel.Controls.Add(lblResolution);
 
             ComboBox cmbResolution = new ComboBox
             {
                 Name = "cmbResolution",
-                Location = new Point(420, 72),
-                Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(60, 60, 60),
+                BackColor = Color.FromArgb(45, 50, 72),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10)
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 170
             };
             cmbResolution.Items.AddRange(new string[] { "Original", "3840x2160 (4K)", "2560x1440 (2K)", "1920x1080 (1080p)", "1280x720 (720p)", "854x480 (480p)", "640x360 (360p)" });
             cmbResolution.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbResolution);
-
-            // Quality/Bitrate
-            Label lblQuality = CreateStyledLabel("Quality:", new Point(590, 75));
-            controlPanel.Controls.Add(lblQuality);
 
             ComboBox cmbQuality = new ComboBox
             {
                 Name = "cmbQuality",
-                Location = new Point(670, 72),
-                Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
-                BackColor = Color.FromArgb(60, 60, 60),
+                BackColor = Color.FromArgb(45, 50, 72),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10)
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 170
             };
             cmbQuality.Items.AddRange(new string[] { "High (Original)", "Medium (Balanced)", "Low (Compressed)", "Custom Bitrate" });
             cmbQuality.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbQuality);
 
-            // Custom Bitrate
-            Label lblBitrate = CreateStyledLabel("Bitrate (kbps):", new Point(840, 75));
+            ComboBox cmbPreset = new ComboBox
+            {
+                Name = "cmbPreset",
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = Color.FromArgb(45, 50, 72),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 200
+            };
+            cmbPreset.Items.AddRange(new string[] { "Cinematic HDR", "Mobile Lightning", "Archive Master", "Social Burst", "Audio Diamond" });
+            cmbPreset.SelectedIndex = 0;
+
+            Label lblBitrate = CreateStyledLabel("Bitrate (kbps):");
             lblBitrate.Name = "lblBitrate";
             lblBitrate.Visible = false;
-            controlPanel.Controls.Add(lblBitrate);
 
             TextBox txtBitrate = new TextBox
             {
                 Name = "txtBitrate",
-                Location = new Point(960, 72),
-                Size = new Size(100, 25),
-                BackColor = Color.FromArgb(60, 60, 60),
+                BackColor = Color.FromArgb(45, 50, 72),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 110,
                 Text = "5000",
                 Visible = false
             };
-            controlPanel.Controls.Add(txtBitrate);
 
             cmbQuality.SelectedIndexChanged += (s, e) =>
             {
@@ -193,85 +433,180 @@ namespace VideoConverter
                 txtBitrate.Visible = isCustom;
             };
 
-            // Audio Options
-            Label lblAudio = CreateStyledLabel("Audio:", new Point(15, 115));
-            controlPanel.Controls.Add(lblAudio);
+            FlowLayoutPanel optionsRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                Margin = new Padding(0, 8, 0, 0)
+            };
+            optionsRow.Controls.Add(CreateOptionGroup("Output Format", cmbFormat));
+            optionsRow.Controls.Add(CreateOptionGroup("Resolution", cmbResolution));
+            optionsRow.Controls.Add(CreateOptionGroup("Quality", cmbQuality));
+            optionsRow.Controls.Add(CreateOptionGroup("Preset", cmbPreset));
+
+            FlowLayoutPanel bitrateRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 12, 0, 0)
+            };
+            lblBitrate.Margin = new Padding(0, 6, 8, 0);
+            txtBitrate.Margin = new Padding(0, 3, 0, 0);
+            bitrateRow.Controls.Add(lblBitrate);
+            bitrateRow.Controls.Add(txtBitrate);
+            optionsRow.Controls.Add(bitrateRow);
+            layout.Controls.Add(optionsRow, 0, 3);
+
+            FlowLayoutPanel togglesRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                Margin = new Padding(0, 14, 0, 0)
+            };
 
             CheckBox chkMuteAudio = new CheckBox
             {
                 Name = "chkMuteAudio",
                 Text = "Mute Audio",
-                Location = new Point(150, 115),
-                Size = new Size(120, 25),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 18, 0)
             };
-            controlPanel.Controls.Add(chkMuteAudio);
 
             CheckBox chkAudioOnly = new CheckBox
             {
                 Name = "chkAudioOnly",
-                Text = "Audio Only (Extract)",
-                Location = new Point(280, 115),
-                Size = new Size(160, 25),
+                Text = "Extract Audio Only",
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 18, 0)
             };
-            controlPanel.Controls.Add(chkAudioOnly);
 
-            // Audio Overlay
-            Button btnAudioOverlay = CreateStyledButton("🎵 Add Audio Overlay", new Point(460, 110), new Size(160, 30));
+            CheckBox chkGpuAcceleration = new CheckBox
+            {
+                Name = "chkGpuAcceleration",
+                Text = "GPU Hyperdrive",
+                ForeColor = Color.FromArgb(140, 220, 255),
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 18, 0),
+                Checked = true
+            };
+
+            CheckBox chkAutoShutdown = new CheckBox
+            {
+                Name = "chkAutoShutdown",
+                Text = "Auto Shutdown",
+                ForeColor = Color.FromArgb(255, 200, 130),
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 18, 0)
+            };
+
+            Button btnAudioOverlay = CreateStyledButton("🎵 Audio Overlay", new Size(190, 40));
             btnAudioOverlay.Click += BtnAudioOverlay_Click;
-            controlPanel.Controls.Add(btnAudioOverlay);
+            btnAudioOverlay.Margin = new Padding(0, 0, 18, 0);
 
             Label lblAudioFile = new Label
             {
                 Name = "lblAudioFile",
                 Text = "No audio overlay selected",
-                Location = new Point(630, 115),
-                Size = new Size(400, 25),
-                ForeColor = Color.FromArgb(150, 150, 150),
-                Font = new Font("Segoe UI", 8, FontStyle.Italic)
+                ForeColor = Color.FromArgb(170, 180, 210),
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                AutoSize = true,
+                Margin = new Padding(0, 12, 0, 0)
             };
-            controlPanel.Controls.Add(lblAudioFile);
 
-            // Output Destination
-            Label lblOutput = CreateStyledLabel("Output Folder:", new Point(15, 150));
-            controlPanel.Controls.Add(lblOutput);
+            togglesRow.Controls.Add(chkMuteAudio);
+            togglesRow.Controls.Add(chkAudioOnly);
+            togglesRow.Controls.Add(chkGpuAcceleration);
+            togglesRow.Controls.Add(chkAutoShutdown);
+            togglesRow.Controls.Add(btnAudioOverlay);
+            togglesRow.Controls.Add(lblAudioFile);
+            layout.Controls.Add(togglesRow, 0, 4);
+
+            TableLayoutPanel outputRow = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            TableLayoutPanel outputPathLayout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Fill,
+                AutoSize = true
+            };
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            Label lblOutput = CreateStyledLabel("Output Vault");
+            lblOutput.Margin = new Padding(0, 6, 12, 0);
 
             TextBox txtOutputPath = new TextBox
             {
                 Name = "txtOutputPath",
-                Location = new Point(150, 147),
-                Size = new Size(800, 25),
-                BackColor = Color.FromArgb(60, 60, 60),
+                BackColor = Color.FromArgb(45, 50, 72),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 10),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Width = 420,
                 Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
             };
-            controlPanel.Controls.Add(txtOutputPath);
 
-            Button btnBrowseOutput = CreateStyledButton("Browse...", new Point(960, 145), new Size(100, 30));
+            Button btnBrowseOutput = CreateStyledButton("Browse Vault", new Size(160, 40));
+            btnBrowseOutput.Margin = new Padding(12, 0, 0, 0);
             btnBrowseOutput.Click += (s, e) => BrowseOutputFolder(txtOutputPath);
-            controlPanel.Controls.Add(btnBrowseOutput);
 
-            // Start Conversion Button
-            Button btnStartConversion = CreateStyledButton("🚀 START CONVERSION", new Point(1080, 110), new Size(240, 50));
-            btnStartConversion.BackColor = Color.FromArgb(0, 180, 0);
-            btnStartConversion.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+            outputPathLayout.Controls.Add(lblOutput, 0, 0);
+            outputPathLayout.Controls.Add(txtOutputPath, 1, 0);
+            outputPathLayout.Controls.Add(btnBrowseOutput, 2, 0);
+
+            Button btnStartConversion = CreateStyledButton("🚀 Ignite Conversion", new Size(260, 58));
+            btnStartConversion.BackColor = Color.FromArgb(0, 185, 120);
+            btnStartConversion.Font = new Font("Segoe UI", 13, FontStyle.Bold);
+            btnStartConversion.Margin = new Padding(24, 0, 0, 0);
             btnStartConversion.Click += BtnStartConversion_Click;
-            controlPanel.Controls.Add(btnStartConversion);
 
-            // Job Queue DataGridView
+            outputRow.Controls.Add(outputPathLayout, 0, 0);
+            outputRow.Controls.Add(btnStartConversion, 1, 0);
+            layout.Controls.Add(outputRow, 0, 5);
+
+            FlowLayoutPanel pipelineRow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 18, 0, 0)
+            };
+            pipelineRow.Controls.Add(CreateBadge("Pipeline: Capture → Enhance → Encode → Deliver", Color.FromArgb(140, 200, 255), Color.Black, Color.FromArgb(200, 230, 255)));
+            pipelineRow.Controls.Add(CreateBadge("Smart Queue Balancer", Color.FromArgb(255, 160, 120), Color.Black, Color.FromArgb(255, 210, 180)));
+            pipelineRow.Controls.Add(CreateBadge("Auto Retry Resilience", Color.FromArgb(150, 255, 170), Color.Black, Color.FromArgb(210, 255, 220)));
+            layout.Controls.Add(pipelineRow, 0, 6);
+
+            return controlCard;
+        }
+
+        private DataGridView CreateJobsGrid()
+        {
             DataGridView dgvJobs = new DataGridView
             {
                 Name = "dgvJobs",
-                Location = new Point(20, 275),
-                Size = new Size(1340, 520),
-                BackgroundColor = Color.FromArgb(45, 45, 48),
+                BackgroundColor = Color.FromArgb(26, 30, 46),
                 ForeColor = Color.White,
-                GridColor = Color.FromArgb(70, 70, 70),
-                BorderStyle = BorderStyle.FixedSingle,
+                GridColor = Color.FromArgb(70, 90, 140),
+                BorderStyle = BorderStyle.None,
                 AllowUserToAddRows = false,
                 AllowUserToDeleteRows = false,
                 ReadOnly = true,
@@ -279,101 +614,283 @@ namespace VideoConverter
                 AutoGenerateColumns = false,
                 RowHeadersVisible = false,
                 EnableHeadersVisualStyles = false,
-                AllowDrop = true
+                AllowDrop = true,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, 20)
             };
 
             dgvJobs.DragEnter += Form1_DragEnter;
             dgvJobs.DragDrop += Form1_DragDrop;
 
-            dgvJobs.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(60, 60, 60);
+            dgvJobs.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(40, 46, 68);
             dgvJobs.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
             dgvJobs.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10, FontStyle.Bold);
-            dgvJobs.ColumnHeadersHeight = 35;
+            dgvJobs.ColumnHeadersHeight = 40;
 
-            dgvJobs.DefaultCellStyle.BackColor = Color.FromArgb(45, 45, 48);
+            dgvJobs.DefaultCellStyle.BackColor = Color.FromArgb(32, 36, 52);
             dgvJobs.DefaultCellStyle.ForeColor = Color.White;
-            dgvJobs.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0, 120, 215);
-            dgvJobs.DefaultCellStyle.SelectionForeColor = Color.White;
-            dgvJobs.DefaultCellStyle.Font = new Font("Segoe UI", 9);
-            dgvJobs.RowTemplate.Height = 30;
+            dgvJobs.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0, 168, 255);
+            dgvJobs.DefaultCellStyle.SelectionForeColor = Color.Black;
+            dgvJobs.DefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+            dgvJobs.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(36, 40, 60);
+            dgvJobs.RowTemplate.Height = 32;
 
-            // Define Columns
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "FileName", HeaderText = "File Name", Width = 250 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "FileName", HeaderText = "File", Width = 240 });
             dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "FileSizeFormatted", HeaderText = "Size", Width = 100 });
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OutputFormat", HeaderText = "Format", Width = 80 });
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Resolution", HeaderText = "Resolution", Width = 120 });
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "StatusText", HeaderText = "Status", Width = 120 });
-
-            DataGridViewTextBoxColumn progressCol = new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "ProgressText",
-                HeaderText = "Progress",
-                Width = 150
-            };
-            dgvJobs.Columns.Add(progressCol);
-
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ElapsedTime", HeaderText = "Time", Width = 90 });
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Speed", HeaderText = "Speed", Width = 100 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OutputFormat", HeaderText = "Format", Width = 90 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Resolution", HeaderText = "Resolution", Width = 130 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "StatusText", HeaderText = "Status", Width = 140 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ProgressText", HeaderText = "Progress", Width = 120 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ElapsedTime", HeaderText = "Elapsed", Width = 90 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Speed", HeaderText = "Speed", Width = 120 });
             dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ETA", HeaderText = "ETA", Width = 90 });
-            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OutputPath", HeaderText = "Output Path", Width = 240 });
+            dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OutputPath", HeaderText = "Output Path", Width = 280 });
 
             dgvJobs.DataSource = jobBindingList;
-            mainPanel.Controls.Add(dgvJobs);
+            return dgvJobs;
+        }
 
-            // Status Bar
-            Panel statusBar = new Panel
+        private Panel CreateStatusBar()
+        {
+            GradientPanel statusBar = new GradientPanel
             {
-                Dock = DockStyle.Bottom,
-                Height = 35,
-                BackColor = Color.FromArgb(60, 60, 60)
+                Dock = DockStyle.Fill,
+                GradientStartColor = Color.FromArgb(28, 34, 52),
+                GradientEndColor = Color.FromArgb(18, 20, 34),
+                GradientMode = LinearGradientMode.Horizontal,
+                Padding = new Padding(18, 10, 18, 10),
+                Height = 48,
+                Margin = new Padding(0)
             };
-            mainPanel.Controls.Add(statusBar);
+
+            TableLayoutPanel statusLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1
+            };
+            statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            statusLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            statusBar.Controls.Add(statusLayout);
 
             Label lblStatus = new Label
             {
                 Name = "lblStatus",
                 Text = "Ready | Queue: 0 files | Active Conversions: 0/3",
-                Location = new Point(10, 8),
-                Size = new Size(800, 20),
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                ForeColor = Color.FromArgb(210, 220, 245),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft
             };
-            statusBar.Controls.Add(lblStatus);
+            statusLayout.Controls.Add(lblStatus, 0, 0);
 
-            // Context Menu for Jobs
-            ContextMenuStrip contextMenu = new ContextMenuStrip();
-            contextMenu.Items.Add("Remove Selected", null, (s, e) => RemoveSelectedJobs(dgvJobs));
-            contextMenu.Items.Add("Open Output Folder", null, (s, e) => OpenOutputFolder(dgvJobs));
-            contextMenu.Items.Add("Cancel Conversion", null, (s, e) => CancelSelectedJob(dgvJobs));
-            dgvJobs.ContextMenuStrip = contextMenu;
+            FlowLayoutPanel statusBadges = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            statusBadges.Controls.Add(CreateBadge("Autosave ON", Color.FromArgb(120, 210, 120), Color.Black, Color.FromArgb(200, 255, 200)));
+            statusBadges.Controls.Add(CreateBadge("Resilience Shield", Color.FromArgb(255, 200, 120), Color.Black, Color.FromArgb(255, 235, 200)));
+            statusBadges.Controls.Add(CreateBadge("Cloud Sync Linked", Color.FromArgb(150, 200, 255), Color.Black, Color.FromArgb(220, 240, 255)));
+            statusLayout.Controls.Add(statusBadges, 1, 0);
+
+            return statusBar;
         }
 
-        private Button CreateStyledButton(string text, Point location, Size size)
+        private Button CreateNavButton(string text, string emoji, string tooltip)
         {
-            return new Button
+            Button button = new Button
+            {
+                Text = $"{emoji}  {text}",
+                AutoSize = false,
+                Width = 210,
+                Height = 46,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI Semibold", 10F),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(48, 56, 88),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 0, 0),
+                Margin = new Padding(0, 8, 0, 0),
+                Cursor = Cursors.Hand
+            };
+            button.FlatAppearance.BorderSize = 0;
+            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(40, 48, 76);
+            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(64, 84, 128);
+            navigationToolTip?.SetToolTip(button, tooltip);
+
+            button.Paint += (s, e) =>
+            {
+                using Pen accent = new Pen(Color.FromArgb(96, 140, 255), 2);
+                e.Graphics.DrawLine(accent, 4, 6, 4, button.Height - 6);
+            };
+
+            return button;
+        }
+
+        private Label CreateBadge(string text, Color borderColor, Color textColor, Color backColor)
+        {
+            Label badge = new Label
             {
                 Text = text,
-                Location = location,
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                ForeColor = textColor,
+                BackColor = backColor,
+                Padding = new Padding(12, 6, 12, 6),
+                Margin = new Padding(0, 0, 12, 8)
+            };
+
+            badge.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(borderColor, 1);
+                Rectangle rect = new Rectangle(0, 0, badge.Width - 1, badge.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            return badge;
+        }
+
+        private Panel CreateMetricCard(string title, string value, string caption)
+        {
+            Panel card = new Panel
+            {
+                BackColor = Color.FromArgb(32, 38, 62),
+                Dock = DockStyle.Fill,
+                Padding = new Padding(18),
+                Margin = new Padding(8)
+            };
+
+            card.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(90, 120, 180), 1);
+                Rectangle rect = new Rectangle(0, 0, card.Width - 1, card.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+
+            Label lblTitle = new Label
+            {
+                Text = title,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(180, 200, 255),
+                Dock = DockStyle.Top,
+                AutoSize = true
+            };
+
+            Label lblValue = new Label
+            {
+                Text = value,
+                Font = new Font("Segoe UI", 24, FontStyle.Bold),
+                ForeColor = Color.White,
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+
+            Label lblCaption = new Label
+            {
+                Text = caption,
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                ForeColor = Color.FromArgb(190, 200, 230),
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                Margin = new Padding(0, 6, 0, 0)
+            };
+
+            card.Controls.Add(lblCaption);
+            card.Controls.Add(lblValue);
+            card.Controls.Add(lblTitle);
+
+            return card;
+        }
+
+        private class GradientPanel : Panel
+        {
+            public Color GradientStartColor { get; set; } = Color.Black;
+            public Color GradientEndColor { get; set; } = Color.Black;
+            public LinearGradientMode GradientMode { get; set; } = LinearGradientMode.Vertical;
+
+            protected override void OnPaintBackground(PaintEventArgs e)
+            {
+                if (Width <= 0 || Height <= 0)
+                {
+                    base.OnPaintBackground(e);
+                    return;
+                }
+
+                using LinearGradientBrush brush = new LinearGradientBrush(ClientRectangle, GradientStartColor, GradientEndColor, GradientMode);
+                e.Graphics.FillRectangle(brush, ClientRectangle);
+            }
+        }
+
+        private Button CreateStyledButton(string text, Size size)
+        {
+            Button button = new Button
+            {
+                Text = text,
                 Size = size,
-                BackColor = Color.FromArgb(0, 120, 215),
+                BackColor = Color.FromArgb(54, 74, 120),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                Cursor = Cursors.Hand
+                Cursor = Cursors.Hand,
+                Margin = new Padding(0, 0, 10, 0)
             };
+            button.FlatAppearance.BorderSize = 0;
+            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(72, 104, 168);
+            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(44, 62, 98);
+            button.Paint += (s, e) =>
+            {
+                using Pen border = new Pen(Color.FromArgb(90, 120, 190), 1);
+                Rectangle rect = new Rectangle(0, 0, button.Width - 1, button.Height - 1);
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                e.Graphics.DrawRectangle(border, rect);
+            };
+            return button;
         }
 
-        private Label CreateStyledLabel(string text, Point location)
+        private Label CreateStyledLabel(string text)
         {
             return new Label
             {
                 Text = text,
-                Location = location,
-                Size = new Size(130, 25),
+                AutoSize = true,
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft
             };
+        }
+
+        private Control CreateOptionGroup(string labelText, Control control)
+        {
+            TableLayoutPanel group = new TableLayoutPanel
+            {
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 0, 20, 0)
+            };
+            group.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            group.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            Label label = CreateStyledLabel(labelText);
+            label.Margin = new Padding(0, 0, 0, 5);
+            control.Margin = new Padding(0);
+            control.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+
+            if (control is ComboBox comboBox)
+            {
+                comboBox.Width = Math.Max(comboBox.Width, 150);
+            }
+
+            group.Controls.Add(label, 0, 0);
+            group.Controls.Add(control, 0, 1);
+
+            return group;
         }
 
         private void Form1_Load(object sender, EventArgs e)
