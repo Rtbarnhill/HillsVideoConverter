@@ -54,73 +54,130 @@ namespace VideoConverter
             };
             this.Controls.Add(mainPanel);
 
-            // Title Label
+            TableLayoutPanel mainLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                BackColor = Color.FromArgb(30, 30, 30)
+            };
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainPanel.Controls.Add(mainLayout);
+
+            // Header
+            TableLayoutPanel headerLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true
+            };
+
             Label titleLabel = new Label
             {
                 Text = "🎬 Hills Video Converter Pro",
                 Font = new Font("Segoe UI", 24, FontStyle.Bold),
                 ForeColor = Color.FromArgb(0, 150, 255),
                 AutoSize = true,
-                Location = new Point(20, 10)
+                Margin = new Padding(0, 0, 0, 5)
             };
-            mainPanel.Controls.Add(titleLabel);
+            headerLayout.Controls.Add(titleLabel, 0, 0);
 
-            // Subtitle
             Label subtitleLabel = new Label
             {
                 Text = "Advanced Multi-Format Video Conversion Engine | Supports Files Over 25GB",
                 Font = new Font("Segoe UI", 10, FontStyle.Italic),
                 ForeColor = Color.FromArgb(150, 150, 150),
                 AutoSize = true,
-                Location = new Point(25, 50)
+                Margin = new Padding(5, 0, 0, 0)
             };
-            mainPanel.Controls.Add(subtitleLabel);
+            headerLayout.Controls.Add(subtitleLabel, 0, 1);
+
+            mainLayout.Controls.Add(headerLayout, 0, 0);
 
             // Top Control Panel
-            Panel controlPanel = new Panel
+            Panel controlCard = new Panel
             {
-                Location = new Point(20, 85),
-                Size = new Size(1340, 180),
                 BackColor = Color.FromArgb(45, 45, 48),
-                BorderStyle = BorderStyle.FixedSingle
+                BorderStyle = BorderStyle.FixedSingle,
+                Padding = new Padding(20),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 20, 0, 20),
+                Dock = DockStyle.Fill
             };
-            mainPanel.Controls.Add(controlPanel);
+
+            TableLayoutPanel controlLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+            controlLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            controlLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            controlLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            controlLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            controlCard.Controls.Add(controlLayout);
+            mainLayout.Controls.Add(controlCard, 0, 1);
 
             // Add Input Files Button
-            Button btnAddFiles = CreateStyledButton("📁 Add Files", new Point(15, 15), new Size(180, 45));
+            Button btnAddFiles = CreateStyledButton("📁 Add Files", new Size(180, 45));
             btnAddFiles.Click += BtnAddFiles_Click;
-            controlPanel.Controls.Add(btnAddFiles);
 
             // Add Folder Button
-            Button btnAddFolder = CreateStyledButton("📂 Add Folder", new Point(205, 15), new Size(180, 45));
+            Button btnAddFolder = CreateStyledButton("📂 Add Folder", new Size(180, 45));
             btnAddFolder.Click += BtnAddFolder_Click;
-            controlPanel.Controls.Add(btnAddFolder);
 
             // Clear Queue Button
-            Button btnClearQueue = CreateStyledButton("🗑️ Clear Queue", new Point(395, 15), new Size(180, 45));
+            Button btnClearQueue = CreateStyledButton("🗑️ Clear Queue", new Size(180, 45));
             btnClearQueue.Click += (s, e) => ClearQueue();
-            controlPanel.Controls.Add(btnClearQueue);
+            FlowLayoutPanel buttonRow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0)
+            };
+            buttonRow.Controls.Add(btnAddFiles);
+            buttonRow.Controls.Add(btnAddFolder);
+            buttonRow.Controls.Add(btnClearQueue);
 
-            // Drag and Drop Label
             Label lblDragDrop = new Label
             {
                 Text = "⬇️ DRAG & DROP FILES HERE",
                 Font = new Font("Segoe UI", 16, FontStyle.Bold),
                 ForeColor = Color.FromArgb(100, 200, 100),
-                Location = new Point(600, 20),
-                Size = new Size(400, 35),
-                TextAlign = ContentAlignment.MiddleCenter
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(20, 0, 0, 0),
+                Padding = new Padding(10, 5, 10, 5),
+                MinimumSize = new Size(280, 45)
             };
-            controlPanel.Controls.Add(lblDragDrop);
+
+            TableLayoutPanel buttonRowContainer = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0)
+            };
+            buttonRowContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            buttonRowContainer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            buttonRowContainer.Controls.Add(buttonRow, 0, 0);
+            buttonRowContainer.Controls.Add(lblDragDrop, 1, 0);
+            controlLayout.Controls.Add(buttonRowContainer);
 
             // Output Format
-            Label lblFormat = CreateStyledLabel("Output Format:", new Point(15, 75));
-            controlPanel.Controls.Add(lblFormat);
-
             ComboBox cmbFormat = new ComboBox
             {
                 Name = "cmbFormat",
-                Location = new Point(150, 72),
                 Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 BackColor = Color.FromArgb(60, 60, 60),
@@ -129,16 +186,10 @@ namespace VideoConverter
             };
             cmbFormat.Items.AddRange(new string[] { "MP4", "AVI", "MKV", "MOV", "WMV", "FLV", "WEBM", "MP3", "AAC", "WAV", "FLAC", "OGG" });
             cmbFormat.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbFormat);
-
-            // Resolution
-            Label lblResolution = CreateStyledLabel("Resolution:", new Point(320, 75));
-            controlPanel.Controls.Add(lblResolution);
 
             ComboBox cmbResolution = new ComboBox
             {
                 Name = "cmbResolution",
-                Location = new Point(420, 72),
                 Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 BackColor = Color.FromArgb(60, 60, 60),
@@ -147,16 +198,10 @@ namespace VideoConverter
             };
             cmbResolution.Items.AddRange(new string[] { "Original", "3840x2160 (4K)", "2560x1440 (2K)", "1920x1080 (1080p)", "1280x720 (720p)", "854x480 (480p)", "640x360 (360p)" });
             cmbResolution.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbResolution);
-
-            // Quality/Bitrate
-            Label lblQuality = CreateStyledLabel("Quality:", new Point(590, 75));
-            controlPanel.Controls.Add(lblQuality);
 
             ComboBox cmbQuality = new ComboBox
             {
                 Name = "cmbQuality",
-                Location = new Point(670, 72),
                 Size = new Size(150, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 BackColor = Color.FromArgb(60, 60, 60),
@@ -165,18 +210,15 @@ namespace VideoConverter
             };
             cmbQuality.Items.AddRange(new string[] { "High (Original)", "Medium (Balanced)", "Low (Compressed)", "Custom Bitrate" });
             cmbQuality.SelectedIndex = 0;
-            controlPanel.Controls.Add(cmbQuality);
 
             // Custom Bitrate
-            Label lblBitrate = CreateStyledLabel("Bitrate (kbps):", new Point(840, 75));
+            Label lblBitrate = CreateStyledLabel("Bitrate (kbps):");
             lblBitrate.Name = "lblBitrate";
             lblBitrate.Visible = false;
-            controlPanel.Controls.Add(lblBitrate);
 
             TextBox txtBitrate = new TextBox
             {
                 Name = "txtBitrate",
-                Location = new Point(960, 72),
                 Size = new Size(100, 25),
                 BackColor = Color.FromArgb(60, 60, 60),
                 ForeColor = Color.White,
@@ -184,7 +226,6 @@ namespace VideoConverter
                 Text = "5000",
                 Visible = false
             };
-            controlPanel.Controls.Add(txtBitrate);
 
             cmbQuality.SelectedIndexChanged += (s, e) =>
             {
@@ -193,81 +234,156 @@ namespace VideoConverter
                 txtBitrate.Visible = isCustom;
             };
 
-            // Audio Options
-            Label lblAudio = CreateStyledLabel("Audio:", new Point(15, 115));
-            controlPanel.Controls.Add(lblAudio);
+            FlowLayoutPanel optionsRow = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 20, 0, 0)
+            };
 
+            optionsRow.Controls.Add(CreateOptionGroup("Output Format:", cmbFormat));
+            optionsRow.Controls.Add(CreateOptionGroup("Resolution:", cmbResolution));
+            optionsRow.Controls.Add(CreateOptionGroup("Quality:", cmbQuality));
+
+            FlowLayoutPanel bitrateGroup = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0, 0, 20, 0)
+            };
+            lblBitrate.Margin = new Padding(0, 6, 10, 0);
+            txtBitrate.Margin = new Padding(0, 3, 0, 0);
+            bitrateGroup.Controls.Add(lblBitrate);
+            bitrateGroup.Controls.Add(txtBitrate);
+            optionsRow.Controls.Add(bitrateGroup);
+
+            controlLayout.Controls.Add(optionsRow);
+
+            // Audio Options
             CheckBox chkMuteAudio = new CheckBox
             {
                 Name = "chkMuteAudio",
                 Text = "Mute Audio",
-                Location = new Point(150, 115),
                 Size = new Size(120, 25),
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                Font = new Font("Segoe UI", 9),
+                AutoSize = true,
+                Margin = new Padding(0, 6, 20, 0)
             };
-            controlPanel.Controls.Add(chkMuteAudio);
 
             CheckBox chkAudioOnly = new CheckBox
             {
                 Name = "chkAudioOnly",
                 Text = "Audio Only (Extract)",
-                Location = new Point(280, 115),
-                Size = new Size(160, 25),
+                AutoSize = true,
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                Font = new Font("Segoe UI", 9),
+                Margin = new Padding(0, 6, 20, 0)
             };
-            controlPanel.Controls.Add(chkAudioOnly);
 
             // Audio Overlay
-            Button btnAudioOverlay = CreateStyledButton("🎵 Add Audio Overlay", new Point(460, 110), new Size(160, 30));
+            Button btnAudioOverlay = CreateStyledButton("🎵 Add Audio Overlay", new Size(180, 35));
             btnAudioOverlay.Click += BtnAudioOverlay_Click;
-            controlPanel.Controls.Add(btnAudioOverlay);
 
             Label lblAudioFile = new Label
             {
                 Name = "lblAudioFile",
                 Text = "No audio overlay selected",
-                Location = new Point(630, 115),
-                Size = new Size(400, 25),
+                AutoSize = true,
                 ForeColor = Color.FromArgb(150, 150, 150),
-                Font = new Font("Segoe UI", 8, FontStyle.Italic)
+                Font = new Font("Segoe UI", 8, FontStyle.Italic),
+                Margin = new Padding(10, 11, 0, 0)
             };
-            controlPanel.Controls.Add(lblAudioFile);
+
+            FlowLayoutPanel audioRow = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = true,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 20, 0, 0)
+            };
+
+            Label lblAudio = CreateStyledLabel("Audio:");
+            lblAudio.Margin = new Padding(0, 6, 10, 0);
+
+            audioRow.Controls.Add(lblAudio);
+            audioRow.Controls.Add(chkMuteAudio);
+            audioRow.Controls.Add(chkAudioOnly);
+            btnAudioOverlay.Margin = new Padding(0, 3, 10, 0);
+            audioRow.Controls.Add(btnAudioOverlay);
+            audioRow.Controls.Add(lblAudioFile);
+
+            controlLayout.Controls.Add(audioRow);
 
             // Output Destination
-            Label lblOutput = CreateStyledLabel("Output Folder:", new Point(15, 150));
-            controlPanel.Controls.Add(lblOutput);
-
             TextBox txtOutputPath = new TextBox
             {
                 Name = "txtOutputPath",
-                Location = new Point(150, 147),
-                Size = new Size(800, 25),
+                Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(60, 60, 60),
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 10),
                 Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
             };
-            controlPanel.Controls.Add(txtOutputPath);
 
-            Button btnBrowseOutput = CreateStyledButton("Browse...", new Point(960, 145), new Size(100, 30));
+            Button btnBrowseOutput = CreateStyledButton("Browse...", new Size(120, 35));
             btnBrowseOutput.Click += (s, e) => BrowseOutputFolder(txtOutputPath);
-            controlPanel.Controls.Add(btnBrowseOutput);
+            btnBrowseOutput.Margin = new Padding(10, 0, 0, 0);
 
             // Start Conversion Button
-            Button btnStartConversion = CreateStyledButton("🚀 START CONVERSION", new Point(1080, 110), new Size(240, 50));
+            Button btnStartConversion = CreateStyledButton("🚀 START CONVERSION", new Size(240, 55));
             btnStartConversion.BackColor = Color.FromArgb(0, 180, 0);
             btnStartConversion.Font = new Font("Segoe UI", 12, FontStyle.Bold);
             btnStartConversion.Click += BtnStartConversion_Click;
-            controlPanel.Controls.Add(btnStartConversion);
+
+            TableLayoutPanel outputRow = new TableLayoutPanel
+            {
+                ColumnCount = 2,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 20, 0, 0)
+            };
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            outputRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            TableLayoutPanel outputPathLayout = new TableLayoutPanel
+            {
+                ColumnCount = 3,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink
+            };
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            outputPathLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            Label lblOutput = CreateStyledLabel("Output Folder:");
+            lblOutput.Margin = new Padding(0, 6, 10, 0);
+
+            outputPathLayout.Controls.Add(lblOutput, 0, 0);
+            outputPathLayout.Controls.Add(txtOutputPath, 1, 0);
+            outputPathLayout.Controls.Add(btnBrowseOutput, 2, 0);
+
+            btnStartConversion.Anchor = AnchorStyles.Right | AnchorStyles.Top;
+            btnStartConversion.Margin = new Padding(20, 0, 0, 0);
+
+            outputRow.Controls.Add(outputPathLayout, 0, 0);
+            outputRow.Controls.Add(btnStartConversion, 1, 0);
+
+            controlLayout.Controls.Add(outputRow);
 
             // Job Queue DataGridView
             DataGridView dgvJobs = new DataGridView
             {
                 Name = "dgvJobs",
-                Location = new Point(20, 275),
-                Size = new Size(1340, 520),
                 BackgroundColor = Color.FromArgb(45, 45, 48),
                 ForeColor = Color.White,
                 GridColor = Color.FromArgb(70, 70, 70),
@@ -279,7 +395,9 @@ namespace VideoConverter
                 AutoGenerateColumns = false,
                 RowHeadersVisible = false,
                 EnableHeadersVisualStyles = false,
-                AllowDrop = true
+                AllowDrop = true,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 0, 20)
             };
 
             dgvJobs.DragEnter += Form1_DragEnter;
@@ -318,25 +436,27 @@ namespace VideoConverter
             dgvJobs.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OutputPath", HeaderText = "Output Path", Width = 240 });
 
             dgvJobs.DataSource = jobBindingList;
-            mainPanel.Controls.Add(dgvJobs);
+            mainLayout.Controls.Add(dgvJobs, 0, 2);
 
             // Status Bar
             Panel statusBar = new Panel
             {
-                Dock = DockStyle.Bottom,
+                Dock = DockStyle.Fill,
                 Height = 35,
-                BackColor = Color.FromArgb(60, 60, 60)
+                BackColor = Color.FromArgb(60, 60, 60),
+                Margin = new Padding(0)
             };
-            mainPanel.Controls.Add(statusBar);
+            mainLayout.Controls.Add(statusBar, 0, 3);
 
             Label lblStatus = new Label
             {
                 Name = "lblStatus",
                 Text = "Ready | Queue: 0 files | Active Conversions: 0/3",
-                Location = new Point(10, 8),
-                Size = new Size(800, 20),
+                Dock = DockStyle.Fill,
                 ForeColor = Color.White,
-                Font = new Font("Segoe UI", 9)
+                Font = new Font("Segoe UI", 9),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(10, 8, 0, 0)
             };
             statusBar.Controls.Add(lblStatus);
 
@@ -348,32 +468,61 @@ namespace VideoConverter
             dgvJobs.ContextMenuStrip = contextMenu;
         }
 
-        private Button CreateStyledButton(string text, Point location, Size size)
+        private Button CreateStyledButton(string text, Size size)
         {
-            return new Button
+            Button button = new Button
             {
                 Text = text,
-                Location = location,
                 Size = size,
                 BackColor = Color.FromArgb(0, 120, 215),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
-                Cursor = Cursors.Hand
+                Cursor = Cursors.Hand,
+                Margin = new Padding(0, 0, 10, 0)
             };
+            button.FlatAppearance.BorderSize = 0;
+            return button;
         }
 
-        private Label CreateStyledLabel(string text, Point location)
+        private Label CreateStyledLabel(string text)
         {
             return new Label
             {
                 Text = text,
-                Location = location,
-                Size = new Size(130, 25),
+                AutoSize = true,
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleLeft
             };
+        }
+
+        private Control CreateOptionGroup(string labelText, Control control)
+        {
+            TableLayoutPanel group = new TableLayoutPanel
+            {
+                ColumnCount = 1,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 0, 20, 0)
+            };
+            group.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            group.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            Label label = CreateStyledLabel(labelText);
+            label.Margin = new Padding(0, 0, 0, 5);
+            control.Margin = new Padding(0);
+            control.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+
+            if (control is ComboBox comboBox)
+            {
+                comboBox.Width = Math.Max(comboBox.Width, 150);
+            }
+
+            group.Controls.Add(label, 0, 0);
+            group.Controls.Add(control, 0, 1);
+
+            return group;
         }
 
         private void Form1_Load(object sender, EventArgs e)
