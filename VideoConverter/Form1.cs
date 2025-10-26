@@ -5,8 +5,10 @@ using System.Data;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,7 +23,27 @@ namespace VideoConverter
         private ToolTip navigationToolTip;
         private const int MAX_CONCURRENT_CONVERSIONS = 3;
         private int activeConversions = 0;
-        private string ffmpegPath = "ffmpeg.exe"; // Ensure FFmpeg is in the same directory or PATH
+        private string ffmpegPath = "ffmpeg.exe";
+        private bool ffmpegAvailable;
+        private readonly string[] videoFormats = { "MP4", "AVI", "MKV", "MOV", "WMV", "FLV", "WEBM" };
+        private readonly string[] audioFormats = { "MP3", "AAC", "WAV", "FLAC", "OGG" };
+        private ComboBox cmbFormatControl;
+        private ComboBox cmbResolutionControl;
+        private ComboBox cmbQualityControl;
+        private ComboBox cmbPresetControl;
+        private TextBox txtBitrateControl;
+        private CheckBox chkMuteAudioControl;
+        private CheckBox chkAudioOnlyControl;
+        private CheckBox chkGpuAccelerationControl;
+        private CheckBox chkAutoShutdownControl;
+        private Label lblAudioFileControl;
+        private TextBox txtOutputPathControl;
+        private bool autoShutdownEnabled;
+        private bool shutdownScheduled;
+        private readonly object shutdownLock = new object();
+        private readonly List<string> availableHardwareEncoders = new List<string>();
+        private string preferredHardwareEncoder;
+        private string hardwareAccelerationArgs = string.Empty;
 
         public Form1()
         {
@@ -363,7 +385,7 @@ namespace VideoConverter
             };
             layout.Controls.Add(lblDragDrop, 0, 2);
 
-            ComboBox cmbFormat = new ComboBox
+            cmbFormatControl = new ComboBox
             {
                 Name = "cmbFormat",
                 DropDownStyle = ComboBoxStyle.DropDownList,
@@ -372,10 +394,11 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Width = 170
             };
-            cmbFormat.Items.AddRange(new string[] { "MP4", "AVI", "MKV", "MOV", "WMV", "FLV", "WEBM", "MP3", "AAC", "WAV", "FLAC", "OGG" });
-            cmbFormat.SelectedIndex = 0;
+            cmbFormatControl.Items.AddRange(videoFormats.Cast<object>().Concat(audioFormats.Cast<object>()).ToArray());
+            cmbFormatControl.SelectedIndex = 0;
+            cmbFormatControl.SelectedIndexChanged += CmbFormatControl_SelectedIndexChanged;
 
-            ComboBox cmbResolution = new ComboBox
+            cmbResolutionControl = new ComboBox
             {
                 Name = "cmbResolution",
                 DropDownStyle = ComboBoxStyle.DropDownList,
@@ -384,10 +407,10 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Width = 170
             };
-            cmbResolution.Items.AddRange(new string[] { "Original", "3840x2160 (4K)", "2560x1440 (2K)", "1920x1080 (1080p)", "1280x720 (720p)", "854x480 (480p)", "640x360 (360p)" });
-            cmbResolution.SelectedIndex = 0;
+            cmbResolutionControl.Items.AddRange(new string[] { "Original", "3840x2160 (4K)", "2560x1440 (2K)", "1920x1080 (1080p)", "1280x720 (720p)", "854x480 (480p)", "640x360 (360p)" });
+            cmbResolutionControl.SelectedIndex = 0;
 
-            ComboBox cmbQuality = new ComboBox
+            cmbQualityControl = new ComboBox
             {
                 Name = "cmbQuality",
                 DropDownStyle = ComboBoxStyle.DropDownList,
@@ -396,10 +419,10 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Width = 170
             };
-            cmbQuality.Items.AddRange(new string[] { "High (Original)", "Medium (Balanced)", "Low (Compressed)", "Custom Bitrate" });
-            cmbQuality.SelectedIndex = 0;
+            cmbQualityControl.Items.AddRange(new string[] { "High (Original)", "Medium (Balanced)", "Low (Compressed)", "Custom Bitrate" });
+            cmbQualityControl.SelectedIndex = 0;
 
-            ComboBox cmbPreset = new ComboBox
+            cmbPresetControl = new ComboBox
             {
                 Name = "cmbPreset",
                 DropDownStyle = ComboBoxStyle.DropDownList,
@@ -408,14 +431,15 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Width = 200
             };
-            cmbPreset.Items.AddRange(new string[] { "Cinematic HDR", "Mobile Lightning", "Archive Master", "Social Burst", "Audio Diamond" });
-            cmbPreset.SelectedIndex = 0;
+            cmbPresetControl.Items.AddRange(new string[] { "Cinematic HDR", "Mobile Lightning", "Archive Master", "Social Burst", "Audio Diamond" });
+            cmbPresetControl.SelectedIndexChanged += CmbPresetControl_SelectedIndexChanged;
+            cmbPresetControl.SelectedIndex = 0;
 
             Label lblBitrate = CreateStyledLabel("Bitrate (kbps):");
             lblBitrate.Name = "lblBitrate";
             lblBitrate.Visible = false;
 
-            TextBox txtBitrate = new TextBox
+            txtBitrateControl = new TextBox
             {
                 Name = "txtBitrate",
                 BackColor = Color.FromArgb(45, 50, 72),
@@ -426,11 +450,11 @@ namespace VideoConverter
                 Visible = false
             };
 
-            cmbQuality.SelectedIndexChanged += (s, e) =>
+            cmbQualityControl.SelectedIndexChanged += (s, e) =>
             {
-                bool isCustom = cmbQuality.SelectedIndex == 3;
+                bool isCustom = cmbQualityControl.SelectedIndex == 3;
                 lblBitrate.Visible = isCustom;
-                txtBitrate.Visible = isCustom;
+                txtBitrateControl.Visible = isCustom;
             };
 
             FlowLayoutPanel optionsRow = new FlowLayoutPanel
@@ -441,10 +465,10 @@ namespace VideoConverter
                 WrapContents = true,
                 Margin = new Padding(0, 8, 0, 0)
             };
-            optionsRow.Controls.Add(CreateOptionGroup("Output Format", cmbFormat));
-            optionsRow.Controls.Add(CreateOptionGroup("Resolution", cmbResolution));
-            optionsRow.Controls.Add(CreateOptionGroup("Quality", cmbQuality));
-            optionsRow.Controls.Add(CreateOptionGroup("Preset", cmbPreset));
+            optionsRow.Controls.Add(CreateOptionGroup("Output Format", cmbFormatControl));
+            optionsRow.Controls.Add(CreateOptionGroup("Resolution", cmbResolutionControl));
+            optionsRow.Controls.Add(CreateOptionGroup("Quality", cmbQualityControl));
+            optionsRow.Controls.Add(CreateOptionGroup("Preset", cmbPresetControl));
 
             FlowLayoutPanel bitrateRow = new FlowLayoutPanel
             {
@@ -454,9 +478,9 @@ namespace VideoConverter
                 Margin = new Padding(0, 12, 0, 0)
             };
             lblBitrate.Margin = new Padding(0, 6, 8, 0);
-            txtBitrate.Margin = new Padding(0, 3, 0, 0);
+            txtBitrateControl.Margin = new Padding(0, 3, 0, 0);
             bitrateRow.Controls.Add(lblBitrate);
-            bitrateRow.Controls.Add(txtBitrate);
+            bitrateRow.Controls.Add(txtBitrateControl);
             optionsRow.Controls.Add(bitrateRow);
             layout.Controls.Add(optionsRow, 0, 3);
 
@@ -469,7 +493,7 @@ namespace VideoConverter
                 Margin = new Padding(0, 14, 0, 0)
             };
 
-            CheckBox chkMuteAudio = new CheckBox
+            chkMuteAudioControl = new CheckBox
             {
                 Name = "chkMuteAudio",
                 Text = "Mute Audio",
@@ -479,7 +503,7 @@ namespace VideoConverter
                 Margin = new Padding(0, 6, 18, 0)
             };
 
-            CheckBox chkAudioOnly = new CheckBox
+            chkAudioOnlyControl = new CheckBox
             {
                 Name = "chkAudioOnly",
                 Text = "Extract Audio Only",
@@ -489,7 +513,9 @@ namespace VideoConverter
                 Margin = new Padding(0, 6, 18, 0)
             };
 
-            CheckBox chkGpuAcceleration = new CheckBox
+            chkAudioOnlyControl.CheckedChanged += ChkAudioOnlyControl_CheckedChanged;
+
+            chkGpuAccelerationControl = new CheckBox
             {
                 Name = "chkGpuAcceleration",
                 Text = "GPU Hyperdrive",
@@ -497,10 +523,12 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 9, FontStyle.Bold),
                 AutoSize = true,
                 Margin = new Padding(0, 6, 18, 0),
-                Checked = true
+                Checked = false
             };
 
-            CheckBox chkAutoShutdown = new CheckBox
+            chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
+
+            chkAutoShutdownControl = new CheckBox
             {
                 Name = "chkAutoShutdown",
                 Text = "Auto Shutdown",
@@ -510,11 +538,20 @@ namespace VideoConverter
                 Margin = new Padding(0, 6, 18, 0)
             };
 
+            chkAutoShutdownControl.CheckedChanged += (s, e) =>
+            {
+                autoShutdownEnabled = chkAutoShutdownControl.Checked;
+                if (!autoShutdownEnabled)
+                {
+                    shutdownScheduled = false;
+                }
+            };
+
             Button btnAudioOverlay = CreateStyledButton("🎵 Audio Overlay", new Size(190, 40));
             btnAudioOverlay.Click += BtnAudioOverlay_Click;
             btnAudioOverlay.Margin = new Padding(0, 0, 18, 0);
 
-            Label lblAudioFile = new Label
+            lblAudioFileControl = new Label
             {
                 Name = "lblAudioFile",
                 Text = "No audio overlay selected",
@@ -524,12 +561,12 @@ namespace VideoConverter
                 Margin = new Padding(0, 12, 0, 0)
             };
 
-            togglesRow.Controls.Add(chkMuteAudio);
-            togglesRow.Controls.Add(chkAudioOnly);
-            togglesRow.Controls.Add(chkGpuAcceleration);
-            togglesRow.Controls.Add(chkAutoShutdown);
+            togglesRow.Controls.Add(chkMuteAudioControl);
+            togglesRow.Controls.Add(chkAudioOnlyControl);
+            togglesRow.Controls.Add(chkGpuAccelerationControl);
+            togglesRow.Controls.Add(chkAutoShutdownControl);
             togglesRow.Controls.Add(btnAudioOverlay);
-            togglesRow.Controls.Add(lblAudioFile);
+            togglesRow.Controls.Add(lblAudioFileControl);
             layout.Controls.Add(togglesRow, 0, 4);
 
             TableLayoutPanel outputRow = new TableLayoutPanel
@@ -555,7 +592,7 @@ namespace VideoConverter
             Label lblOutput = CreateStyledLabel("Output Vault");
             lblOutput.Margin = new Padding(0, 6, 12, 0);
 
-            TextBox txtOutputPath = new TextBox
+            txtOutputPathControl = new TextBox
             {
                 Name = "txtOutputPath",
                 BackColor = Color.FromArgb(45, 50, 72),
@@ -567,10 +604,10 @@ namespace VideoConverter
 
             Button btnBrowseOutput = CreateStyledButton("Browse Vault", new Size(160, 40));
             btnBrowseOutput.Margin = new Padding(12, 0, 0, 0);
-            btnBrowseOutput.Click += (s, e) => BrowseOutputFolder(txtOutputPath);
+            btnBrowseOutput.Click += (s, e) => BrowseOutputFolder(txtOutputPathControl);
 
             outputPathLayout.Controls.Add(lblOutput, 0, 0);
-            outputPathLayout.Controls.Add(txtOutputPath, 1, 0);
+            outputPathLayout.Controls.Add(txtOutputPathControl, 1, 0);
             outputPathLayout.Controls.Add(btnBrowseOutput, 2, 0);
 
             Button btnStartConversion = CreateStyledButton("🚀 Ignite Conversion", new Size(260, 58));
@@ -595,7 +632,216 @@ namespace VideoConverter
             pipelineRow.Controls.Add(CreateBadge("Auto Retry Resilience", Color.FromArgb(150, 255, 170), Color.Black, Color.FromArgb(210, 255, 220)));
             layout.Controls.Add(pipelineRow, 0, 6);
 
+            ConfigureAudioOnlyMode(chkAudioOnlyControl?.Checked ?? false);
+
             return controlCard;
+        }
+
+        private void CmbPresetControl_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (cmbPresetControl?.SelectedItem is string preset)
+            {
+                ApplyPreset(preset);
+            }
+        }
+
+        private void ApplyPreset(string preset)
+        {
+            if (cmbFormatControl == null || cmbResolutionControl == null || cmbQualityControl == null)
+            {
+                return;
+            }
+
+            switch (preset)
+            {
+                case "Cinematic HDR":
+                    EnsureVideoMode();
+                    SetComboSelection(cmbFormatControl, "MKV");
+                    SetComboSelection(cmbResolutionControl, "3840x2160 (4K)");
+                    SetComboSelection(cmbQualityControl, "High (Original)");
+                    break;
+                case "Mobile Lightning":
+                    EnsureVideoMode();
+                    SetComboSelection(cmbFormatControl, "MP4");
+                    SetComboSelection(cmbResolutionControl, "1280x720 (720p)");
+                    SetComboSelection(cmbQualityControl, "Medium (Balanced)");
+                    break;
+                case "Archive Master":
+                    EnsureVideoMode();
+                    SetComboSelection(cmbFormatControl, "MOV");
+                    SetComboSelection(cmbResolutionControl, "1920x1080 (1080p)");
+                    SetComboSelection(cmbQualityControl, "High (Original)");
+                    txtBitrateControl.Visible = false;
+                    break;
+                case "Social Burst":
+                    EnsureVideoMode();
+                    SetComboSelection(cmbFormatControl, "MP4");
+                    SetComboSelection(cmbResolutionControl, "854x480 (480p)");
+                    SetComboSelection(cmbQualityControl, "Low (Compressed)");
+                    break;
+                case "Audio Diamond":
+                    if (chkAudioOnlyControl != null)
+                    {
+                        chkAudioOnlyControl.Checked = true;
+                    }
+                    SetComboSelection(cmbFormatControl, "FLAC");
+                    break;
+            }
+        }
+
+        private void EnsureVideoMode()
+        {
+            if (chkAudioOnlyControl != null && chkAudioOnlyControl.Checked)
+            {
+                chkAudioOnlyControl.Checked = false;
+            }
+        }
+
+        private void SetComboSelection(ComboBox comboBox, string value)
+        {
+            if (comboBox == null || string.IsNullOrEmpty(value))
+            {
+                return;
+            }
+
+            int index = comboBox.Items.IndexOf(value);
+            if (index >= 0)
+            {
+                comboBox.SelectedIndex = index;
+            }
+        }
+
+        private void ChkAudioOnlyControl_CheckedChanged(object sender, EventArgs e)
+        {
+            ConfigureAudioOnlyMode(chkAudioOnlyControl?.Checked ?? false);
+        }
+
+        private void CmbFormatControl_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (cmbFormatControl == null || chkGpuAccelerationControl == null)
+            {
+                return;
+            }
+
+            bool audioOnly = chkAudioOnlyControl?.Checked ?? false;
+            bool formatSupportsGpu = SupportsGpuForFormat(cmbFormatControl.SelectedItem as string);
+
+            chkGpuAccelerationControl.CheckedChanged -= ChkGpuAccelerationControl_CheckedChanged;
+            bool canUseGpu = availableHardwareEncoders.Any() && formatSupportsGpu && !audioOnly;
+            chkGpuAccelerationControl.Enabled = canUseGpu;
+            if (!canUseGpu)
+            {
+                chkGpuAccelerationControl.Checked = false;
+            }
+            chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
+        }
+
+        private void ConfigureAudioOnlyMode(bool audioOnly)
+        {
+            if (cmbFormatControl == null || cmbResolutionControl == null || cmbQualityControl == null)
+            {
+                return;
+            }
+
+            string previousSelection = cmbFormatControl.SelectedItem as string;
+            cmbFormatControl.Items.Clear();
+            if (audioOnly)
+            {
+                cmbFormatControl.Items.AddRange(audioFormats.Cast<object>().ToArray());
+                if (previousSelection == null || !audioFormats.Contains(previousSelection))
+                {
+                    cmbFormatControl.SelectedIndex = 0;
+                }
+                else
+                {
+                    SetComboSelection(cmbFormatControl, previousSelection);
+                }
+            }
+            else
+            {
+                cmbFormatControl.Items.AddRange(videoFormats.Cast<object>().Concat(audioFormats.Cast<object>()).ToArray());
+                if (!string.IsNullOrEmpty(previousSelection))
+                {
+                    SetComboSelection(cmbFormatControl, previousSelection);
+                }
+                else
+                {
+                    cmbFormatControl.SelectedIndex = 0;
+                }
+            }
+
+            cmbResolutionControl.Enabled = !audioOnly;
+            cmbQualityControl.Enabled = !audioOnly;
+            cmbPresetControl.Enabled = !audioOnly;
+            txtBitrateControl.Enabled = !audioOnly;
+
+            if (chkGpuAccelerationControl != null)
+            {
+                chkGpuAccelerationControl.CheckedChanged -= ChkGpuAccelerationControl_CheckedChanged;
+                bool hasHardware = availableHardwareEncoders.Any();
+                chkGpuAccelerationControl.Enabled = !audioOnly && hasHardware;
+                if (!chkGpuAccelerationControl.Enabled)
+                {
+                    chkGpuAccelerationControl.Checked = false;
+                }
+                chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
+            }
+
+            CmbFormatControl_SelectedIndexChanged(null, EventArgs.Empty);
+        }
+
+        private bool SupportsGpuForFormat(string format)
+        {
+            if (string.IsNullOrWhiteSpace(format))
+            {
+                return false;
+            }
+
+            string normalized = format.Trim().ToUpperInvariant();
+            return normalized == "MP4" ||
+                   normalized == "MKV" ||
+                   normalized == "MOV" ||
+                   normalized == "AVI" ||
+                   normalized == "WMV" ||
+                   normalized == "FLV";
+        }
+
+        private string NormalizeBitrate(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            string digitsOnly = new string(value.Where(char.IsDigit).ToArray());
+            if (string.IsNullOrWhiteSpace(digitsOnly))
+            {
+                return null;
+            }
+
+            if (int.TryParse(digitsOnly, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed) && parsed > 0)
+            {
+                return parsed.ToString(CultureInfo.InvariantCulture);
+            }
+
+            return null;
+        }
+
+        private void ChkGpuAccelerationControl_CheckedChanged(object sender, EventArgs e)
+        {
+            if (chkGpuAccelerationControl == null)
+            {
+                return;
+            }
+
+            if (chkGpuAccelerationControl.Checked && string.IsNullOrEmpty(preferredHardwareEncoder))
+            {
+                chkGpuAccelerationControl.CheckedChanged -= ChkGpuAccelerationControl_CheckedChanged;
+                chkGpuAccelerationControl.Checked = false;
+                chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
+                MessageBox.Show("No compatible GPU encoder was detected. Hardware acceleration is unavailable on this system.",
+                    "Hardware Acceleration", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private DataGridView CreateJobsGrid()
@@ -941,12 +1187,11 @@ namespace VideoConverter
 
                 if (ofd.ShowDialog() == DialogResult.OK)
                 {
-                    Label lblAudioFile = this.Controls.Find("lblAudioFile", true).FirstOrDefault() as Label;
-                    if (lblAudioFile != null)
+                    if (lblAudioFileControl != null)
                     {
-                        lblAudioFile.Text = $"Audio Overlay: {Path.GetFileName(ofd.FileName)}";
-                        lblAudioFile.Tag = ofd.FileName;
-                        lblAudioFile.ForeColor = Color.FromArgb(100, 200, 100);
+                        lblAudioFileControl.Text = $"Audio Overlay: {Path.GetFileName(ofd.FileName)}";
+                        lblAudioFileControl.Tag = ofd.FileName;
+                        lblAudioFileControl.ForeColor = Color.FromArgb(100, 200, 100);
                     }
                 }
             }
@@ -1005,18 +1250,23 @@ namespace VideoConverter
 
         private void AddFilesToQueue(string[] files)
         {
-            ComboBox cmbFormat = this.Controls.Find("cmbFormat", true).FirstOrDefault() as ComboBox;
-            ComboBox cmbResolution = this.Controls.Find("cmbResolution", true).FirstOrDefault() as ComboBox;
-            ComboBox cmbQuality = this.Controls.Find("cmbQuality", true).FirstOrDefault() as ComboBox;
-            TextBox txtBitrate = this.Controls.Find("txtBitrate", true).FirstOrDefault() as TextBox;
-            CheckBox chkMuteAudio = this.Controls.Find("chkMuteAudio", true).FirstOrDefault() as CheckBox;
-            CheckBox chkAudioOnly = this.Controls.Find("chkAudioOnly", true).FirstOrDefault() as CheckBox;
-            TextBox txtOutputPath = this.Controls.Find("txtOutputPath", true).FirstOrDefault() as TextBox;
-            Label lblAudioFile = this.Controls.Find("lblAudioFile", true).FirstOrDefault() as Label;
+            if (files == null || files.Length == 0)
+            {
+                return;
+            }
 
             foreach (string file in files)
             {
-                if (!File.Exists(file)) continue;
+                if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
+                {
+                    continue;
+                }
+
+                if (conversionQueue.Any(existing => string.Equals(existing.InputPath, file, StringComparison.OrdinalIgnoreCase) &&
+                                                     (existing.Status == ConversionStatus.Queued || existing.Status == ConversionStatus.Converting)))
+                {
+                    continue;
+                }
 
                 FileInfo fi = new FileInfo(file);
 
@@ -1025,18 +1275,50 @@ namespace VideoConverter
                     InputPath = file,
                     FileName = fi.Name,
                     FileSize = fi.Length,
-                    OutputFormat = cmbFormat?.SelectedItem?.ToString() ?? "MP4",
-                    Resolution = cmbResolution?.SelectedItem?.ToString() ?? "Original",
-                    Quality = cmbQuality?.SelectedItem?.ToString() ?? "High (Original)",
-                    CustomBitrate = cmbQuality?.SelectedIndex == 3 ? (txtBitrate?.Text ?? "5000") : null,
-                    MuteAudio = chkMuteAudio?.Checked ?? false,
-                    AudioOnly = chkAudioOnly?.Checked ?? false,
-                    AudioOverlayPath = lblAudioFile?.Tag as string,
-                    OutputDirectory = txtOutputPath?.Text ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                    OutputFormat = cmbFormatControl?.SelectedItem?.ToString() ?? "MP4",
+                    Resolution = cmbResolutionControl?.SelectedItem?.ToString() ?? "Original",
+                    Quality = cmbQualityControl?.SelectedItem?.ToString() ?? "High (Original)",
+                    CustomBitrate = cmbQualityControl?.SelectedIndex == 3 ? txtBitrateControl?.Text : null,
+                    MuteAudio = chkMuteAudioControl?.Checked ?? false,
+                    AudioOnly = chkAudioOnlyControl?.Checked ?? false,
+                    AudioOverlayPath = lblAudioFileControl?.Tag as string,
+                    OutputDirectory = txtOutputPathControl?.Text ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                    UseGpuAcceleration = chkGpuAccelerationControl?.Checked == true && !string.IsNullOrEmpty(preferredHardwareEncoder),
+                    HardwareEncoder = !string.IsNullOrEmpty(preferredHardwareEncoder) ? preferredHardwareEncoder : null,
                     Status = ConversionStatus.Queued
                 };
 
-                job.OutputPath = GenerateOutputPath(job);
+                job.CustomBitrate = NormalizeBitrate(job.CustomBitrate);
+
+                if (cmbQualityControl?.SelectedIndex == 3 && string.IsNullOrEmpty(job.CustomBitrate))
+                {
+                    job.CustomBitrate = "5000";
+                }
+
+                bool formatSupportsGpu = SupportsGpuForFormat(job.OutputFormat);
+                job.UseGpuAcceleration = job.UseGpuAcceleration && formatSupportsGpu;
+
+                if (!job.UseGpuAcceleration)
+                {
+                    job.HardwareEncoder = null;
+                }
+
+                if (job.AudioOnly)
+                {
+                    job.UseGpuAcceleration = false;
+                    job.HardwareEncoder = null;
+                }
+
+                try
+                {
+                    job.OutputPath = GenerateOutputPath(job);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Failed to prepare output for {fi.Name}: {ex.Message}", "Output Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    continue;
+                }
+
                 conversionQueue.Add(job);
                 jobBindingList.Add(job);
             }
@@ -1046,6 +1328,18 @@ namespace VideoConverter
 
         private string GenerateOutputPath(ConversionJob job)
         {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(job.OutputDirectory))
+                {
+                    Directory.CreateDirectory(job.OutputDirectory);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"Unable to create output directory '{job.OutputDirectory}': {ex.Message}");
+            }
+
             string fileName = Path.GetFileNameWithoutExtension(job.FileName);
             string extension = job.OutputFormat.ToLower();
             string outputPath = Path.Combine(job.OutputDirectory, $"{fileName}.{extension}");
@@ -1165,6 +1459,10 @@ namespace VideoConverter
                     job.Progress = 100;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                job.Status = ConversionStatus.Cancelled;
+            }
             catch (Exception ex)
             {
                 job.Status = ConversionStatus.Failed;
@@ -1175,15 +1473,20 @@ namespace VideoConverter
                 activeConversions--;
                 job.UpdateDisplay();
                 UpdateStatusBar();
+                TryTriggerAutoShutdown();
+                job.CancellationToken?.Dispose();
+                job.CancellationToken = null;
             }
         }
 
         private void ConvertFile(ConversionJob job)
         {
-            if (!File.Exists(ffmpegPath) && !IsFFmpegInPath())
+            if (!ffmpegAvailable && !ResolveFfmpegPath())
             {
-                throw new Exception("FFmpeg not found! Please ensure ffmpeg.exe is in the application directory or system PATH.");
+                throw new Exception("FFmpeg not found! Please ensure ffmpeg is in the application directory or system PATH.");
             }
+
+            ffmpegAvailable = true;
 
             string arguments = BuildFFmpegArguments(job);
 
@@ -1228,6 +1531,101 @@ namespace VideoConverter
             }
         }
 
+        private void TryTriggerAutoShutdown()
+        {
+            if (!autoShutdownEnabled)
+            {
+                return;
+            }
+
+            if (activeConversions > 0 || conversionQueue.Any(j => j.Status == ConversionStatus.Queued || j.Status == ConversionStatus.Converting))
+            {
+                return;
+            }
+
+            if (!conversionQueue.Any(j => j.Status == ConversionStatus.Completed))
+            {
+                return;
+            }
+
+            lock (shutdownLock)
+            {
+                if (shutdownScheduled)
+                {
+                    return;
+                }
+                shutdownScheduled = true;
+            }
+
+            BeginInvoke((MethodInvoker)(() =>
+            {
+                DialogResult result = MessageBox.Show(
+                    "All conversions are complete. Do you want to shut down the system in 60 seconds?",
+                    "Auto Shutdown",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.Yes)
+                {
+                    ScheduleSystemShutdown();
+                }
+                else
+                {
+                    lock (shutdownLock)
+                    {
+                        shutdownScheduled = false;
+                        autoShutdownEnabled = false;
+                    }
+                    if (chkAutoShutdownControl != null)
+                    {
+                        chkAutoShutdownControl.Checked = false;
+                    }
+                }
+            }));
+        }
+
+        private void ScheduleSystemShutdown()
+        {
+            try
+            {
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    MessageBox.Show("Automatic shutdown is only supported on Windows systems.", "Auto Shutdown", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    lock (shutdownLock)
+                    {
+                        shutdownScheduled = false;
+                        autoShutdownEnabled = false;
+                    }
+                    if (chkAutoShutdownControl != null)
+                    {
+                        chkAutoShutdownControl.Checked = false;
+                    }
+                    return;
+                }
+
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = "shutdown",
+                    Arguments = "/s /t 60 /c \"Hills Video Converter finished all conversions.\"",
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to schedule system shutdown: {ex.Message}", "Auto Shutdown", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                lock (shutdownLock)
+                {
+                    shutdownScheduled = false;
+                }
+                if (chkAutoShutdownControl != null)
+                {
+                    chkAutoShutdownControl.Checked = false;
+                }
+            }
+        }
+
         private string BuildFFmpegArguments(ConversionJob job)
         {
             StringBuilder args = new StringBuilder();
@@ -1250,21 +1648,18 @@ namespace VideoConverter
             }
 
             // Quality/Bitrate settings
-            if (job.Quality == "High (Original)")
+            if (!job.AudioOnly)
             {
-                args.Append("-c:v libx264 -preset slow -crf 18 ");
-            }
-            else if (job.Quality == "Medium (Balanced)")
-            {
-                args.Append("-c:v libx264 -preset medium -crf 23 ");
-            }
-            else if (job.Quality == "Low (Compressed)")
-            {
-                args.Append("-c:v libx264 -preset fast -crf 28 ");
-            }
-            else if (job.Quality == "Custom Bitrate" && !string.IsNullOrEmpty(job.CustomBitrate))
-            {
-                args.Append($"-b:v {job.CustomBitrate}k ");
+                if (job.UseGpuAcceleration && !string.IsNullOrEmpty(job.HardwareEncoder))
+                {
+                    args.Append(hardwareAccelerationArgs);
+                    args.Append($"-c:v {job.HardwareEncoder} ");
+                    args.Append(GetGpuQualityArguments(job));
+                }
+                else
+                {
+                    args.Append(GetCpuQualityArguments(job));
+                }
             }
 
             // Audio settings
@@ -1315,6 +1710,115 @@ namespace VideoConverter
             args.Append($"\"{job.OutputPath}\"");
 
             return args.ToString();
+        }
+
+        private string GetCpuQualityArguments(ConversionJob job)
+        {
+            if (job.Quality == "Custom Bitrate" && !string.IsNullOrEmpty(job.CustomBitrate))
+            {
+                return $"-c:v libx264 -preset medium -b:v {job.CustomBitrate}k ";
+            }
+
+            return job.Quality switch
+            {
+                "High (Original)" => "-c:v libx264 -preset slow -crf 18 ",
+                "Medium (Balanced)" => "-c:v libx264 -preset medium -crf 23 ",
+                "Low (Compressed)" => "-c:v libx264 -preset fast -crf 28 ",
+                _ => "-c:v libx264 -preset medium -crf 23 "
+            };
+        }
+
+        private string GetGpuQualityArguments(ConversionJob job)
+        {
+            StringBuilder builder = new StringBuilder();
+            bool hasCustomBitrate = job.Quality == "Custom Bitrate" && !string.IsNullOrEmpty(job.CustomBitrate);
+
+            if (job.HardwareEncoder?.Contains("nvenc") == true)
+            {
+                string preset = job.Quality switch
+                {
+                    "High (Original)" => "p4",
+                    "Medium (Balanced)" => "p5",
+                    "Low (Compressed)" => "p6",
+                    "Custom Bitrate" => "p5",
+                    _ => "p5"
+                };
+
+                builder.Append($"-preset {preset} -rc vbr ");
+                if (hasCustomBitrate)
+                {
+                    builder.Append($"-b:v {job.CustomBitrate}k ");
+                }
+                else
+                {
+                    string cq = job.Quality switch
+                    {
+                        "High (Original)" => "18",
+                        "Medium (Balanced)" => "23",
+                        "Low (Compressed)" => "28",
+                        _ => "21"
+                    };
+                    builder.Append($"-cq {cq} ");
+                }
+            }
+            else if (job.HardwareEncoder?.Contains("qsv") == true)
+            {
+                string preset = job.Quality switch
+                {
+                    "High (Original)" => "balanced",
+                    "Medium (Balanced)" => "balanced",
+                    "Low (Compressed)" => "speed",
+                    _ => "balanced"
+                };
+                builder.Append($"-preset {preset} ");
+                if (hasCustomBitrate)
+                {
+                    builder.Append($"-b:v {job.CustomBitrate}k ");
+                }
+                else
+                {
+                    string quality = job.Quality switch
+                    {
+                        "High (Original)" => "18",
+                        "Medium (Balanced)" => "23",
+                        "Low (Compressed)" => "28",
+                        _ => "23"
+                    };
+                    builder.Append($"-global_quality {quality} ");
+                }
+            }
+            else if (job.HardwareEncoder?.Contains("amf") == true)
+            {
+                string quality = job.Quality switch
+                {
+                    "High (Original)" => "quality",
+                    "Medium (Balanced)" => "balanced",
+                    "Low (Compressed)" => "speed",
+                    _ => "balanced"
+                };
+                builder.Append($"-quality {quality} ");
+                if (hasCustomBitrate)
+                {
+                    builder.Append($"-b:v {job.CustomBitrate}k ");
+                }
+                else
+                {
+                    string qp = job.Quality switch
+                    {
+                        "High (Original)" => "18",
+                        "Medium (Balanced)" => "23",
+                        "Low (Compressed)" => "28",
+                        _ => "23"
+                    };
+                    builder.Append($"-rc cqp -qp_i {qp} -qp_p {qp} -qp_b {qp} ");
+                }
+            }
+            else if (hasCustomBitrate)
+            {
+                builder.Append($"-b:v {job.CustomBitrate}k ");
+            }
+
+            return builder.ToString();
         }
 
         private void ParseFFmpegProgress(ConversionJob job, string output)
@@ -1376,22 +1880,37 @@ namespace VideoConverter
 
         private TimeSpan ParseFFmpegTime(string timeStr)
         {
-            try
+            if (string.IsNullOrWhiteSpace(timeStr))
             {
-                timeStr = timeStr.Trim();
-                string[] parts = timeStr.Split(':');
-
-                if (parts.Length == 3)
-                {
-                    int hours = int.Parse(parts[0]);
-                    int minutes = int.Parse(parts[1]);
-                    double seconds = double.Parse(parts[2].Replace(',', '.'));
-                    return new TimeSpan(0, hours, minutes, (int)seconds, (int)((seconds % 1) * 1000));
-                }
+                return TimeSpan.Zero;
             }
-            catch { }
 
-            return TimeSpan.Zero;
+            string[] parts = timeStr.Trim().Split(':');
+            if (parts.Length != 3)
+            {
+                return TimeSpan.Zero;
+            }
+
+            if (!int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int hours))
+            {
+                return TimeSpan.Zero;
+            }
+
+            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int minutes))
+            {
+                return TimeSpan.Zero;
+            }
+
+            string secondsPart = parts[2].Replace(',', '.');
+            if (!double.TryParse(secondsPart, NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds))
+            {
+                return TimeSpan.Zero;
+            }
+
+            int wholeSeconds = (int)Math.Floor(seconds);
+            int milliseconds = (int)Math.Round((seconds - wholeSeconds) * 1000);
+
+            return new TimeSpan(hours, minutes, wholeSeconds).Add(TimeSpan.FromMilliseconds(milliseconds));
         }
 
         #endregion
@@ -1407,7 +1926,9 @@ namespace VideoConverter
 
         private void CheckFFmpegAvailability()
         {
-            if (!File.Exists(ffmpegPath) && !IsFFmpegInPath())
+            ffmpegAvailable = ResolveFfmpegPath();
+
+            if (!ffmpegAvailable)
             {
                 MessageBox.Show(
                     "FFmpeg not found!\n\n" +
@@ -1417,32 +1938,161 @@ namespace VideoConverter
                     "FFmpeg Required",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
+                availableHardwareEncoders.Clear();
+                preferredHardwareEncoder = null;
+                hardwareAccelerationArgs = string.Empty;
+                UpdateGpuToggleAvailability();
+                return;
             }
+
+            DetectHardwareEncoders();
+            UpdateGpuToggleAvailability();
+            ConfigureAudioOnlyMode(chkAudioOnlyControl?.Checked ?? false);
         }
 
-        private bool IsFFmpegInPath()
+        private bool ResolveFfmpegPath()
         {
+            string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+            List<string> candidates = new List<string>
+            {
+                Path.Combine(baseDirectory, "ffmpeg.exe"),
+                Path.Combine(baseDirectory, "ffmpeg"),
+                "ffmpeg",
+                "ffmpeg.exe"
+            };
+
+            foreach (string candidate in candidates.Distinct())
+            {
+                if (TryRunFfmpegCommand(candidate, "-version", out _))
+                {
+                    ffmpegPath = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool TryRunFfmpegCommand(string fileName, string arguments, out string output)
+        {
+            output = string.Empty;
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
-                    FileName = "ffmpeg",
-                    Arguments = "-version",
+                    FileName = fileName,
+                    Arguments = arguments,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardOutput = true
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
                 };
 
                 using (Process process = Process.Start(psi))
                 {
+                    if (process == null)
+                    {
+                        return false;
+                    }
+
+                    string stdOut = process.StandardOutput.ReadToEnd();
+                    string stdErr = process.StandardError.ReadToEnd();
                     process.WaitForExit();
-                    return process.ExitCode == 0;
+
+                    if (process.ExitCode == 0)
+                    {
+                        output = string.IsNullOrWhiteSpace(stdOut) ? stdErr : stdOut + Environment.NewLine + stdErr;
+                        return true;
+                    }
                 }
             }
             catch
             {
-                return false;
+                // Ignore resolution errors
             }
+
+            return false;
+        }
+
+        private void DetectHardwareEncoders()
+        {
+            availableHardwareEncoders.Clear();
+            preferredHardwareEncoder = null;
+            hardwareAccelerationArgs = string.Empty;
+
+            if (!ffmpegAvailable)
+            {
+                return;
+            }
+
+            if (!TryRunFfmpegCommand(ffmpegPath, "-hide_banner -encoders", out string output))
+            {
+                return;
+            }
+
+            string[] preferredOrder = { "h264_nvenc", "hevc_nvenc", "h264_qsv", "hevc_qsv", "h264_amf", "hevc_amf" };
+            foreach (string encoder in preferredOrder)
+            {
+                if (output.Contains(encoder))
+                {
+                    availableHardwareEncoders.Add(encoder);
+                }
+            }
+
+            preferredHardwareEncoder = availableHardwareEncoders.FirstOrDefault();
+            hardwareAccelerationArgs = ResolveHardwareAccelerationArgs(preferredHardwareEncoder);
+        }
+
+        private string ResolveHardwareAccelerationArgs(string encoder)
+        {
+            if (string.IsNullOrEmpty(encoder))
+            {
+                return string.Empty;
+            }
+
+            if (encoder.Contains("nvenc"))
+            {
+                return "-hwaccel cuda ";
+            }
+
+            if (encoder.Contains("qsv"))
+            {
+                return "-hwaccel qsv ";
+            }
+
+            if (encoder.Contains("amf"))
+            {
+                return "-hwaccel d3d11va ";
+            }
+
+            return string.Empty;
+        }
+
+        private void UpdateGpuToggleAvailability()
+        {
+            if (chkGpuAccelerationControl == null)
+            {
+                return;
+            }
+
+            chkGpuAccelerationControl.CheckedChanged -= ChkGpuAccelerationControl_CheckedChanged;
+
+            bool hasHardware = availableHardwareEncoders.Any();
+            chkGpuAccelerationControl.Enabled = hasHardware;
+            chkGpuAccelerationControl.Checked = hasHardware;
+            chkGpuAccelerationControl.ForeColor = hasHardware
+                ? Color.FromArgb(140, 220, 255)
+                : Color.FromArgb(120, 130, 150);
+            if (!hasHardware)
+            {
+                chkGpuAccelerationControl.Text = "GPU Hyperdrive (Unavailable)";
+            }
+            else
+            {
+                chkGpuAccelerationControl.Text = "GPU Hyperdrive";
+            }
+
+            chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
         }
 
         private void UpdateStatusBar()
@@ -1485,6 +2135,8 @@ namespace VideoConverter
         public string AudioOverlayPath { get; set; }
         public string OutputDirectory { get; set; }
         public string OutputPath { get; set; }
+        public bool UseGpuAcceleration { get; set; }
+        public string HardwareEncoder { get; set; }
         public DateTime? StartTime { get; set; }
         public TimeSpan TotalDuration { get; set; }
         public CancellationTokenSource CancellationToken { get; set; }
