@@ -56,6 +56,7 @@ namespace VideoConverter
         private bool queueProcessingActive;
         private bool? preferredGpuToggleState;
         private const int MAX_RETRIES = 2;
+        private bool statusBarUpdatePendingHandle;
 
         public Form1()
         {
@@ -2679,19 +2680,45 @@ namespace VideoConverter
 
         private void UpdateStatusBar()
         {
-            Label lblStatus = this.Controls.Find("lblStatus", true).FirstOrDefault() as Label;
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            if (!IsHandleCreated)
+            {
+                if (!statusBarUpdatePendingHandle)
+                {
+                    HandleCreated += Form1_HandleCreatedForStatusBar;
+                    statusBarUpdatePendingHandle = true;
+                }
+
+                return;
+            }
+
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)UpdateStatusBar);
+                return;
+            }
+
+            Label lblStatus = Controls.Find("lblStatus", true).FirstOrDefault() as Label;
             if (lblStatus != null)
             {
                 int queuedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Queued);
                 int completedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Completed);
                 int failedCount = conversionQueue.Count(j => j.Status == ConversionStatus.Failed);
 
-                lblStatus.Invoke((MethodInvoker)delegate
-                {
-                    lblStatus.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{maxConcurrentConversions} | " +
-                                   $"Completed: {completedCount} | Failed: {failedCount}";
-                });
+                lblStatus.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{maxConcurrentConversions} | " +
+                                 $"Completed: {completedCount} | Failed: {failedCount}";
             }
+        }
+
+        private void Form1_HandleCreatedForStatusBar(object sender, EventArgs e)
+        {
+            HandleCreated -= Form1_HandleCreatedForStatusBar;
+            statusBarUpdatePendingHandle = false;
+            UpdateStatusBar();
         }
 
         #endregion
