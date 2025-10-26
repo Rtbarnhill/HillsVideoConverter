@@ -8,6 +8,12 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Windows.Foundation;
+using Windows.Media.MediaProperties;
+using Windows.Media.Transcoding;
+using Windows.Storage;
+using Windows.Storage.FileProperties;
 
 namespace VideoConverter
 {
@@ -637,67 +643,283 @@ namespace VideoConverter
                 throw new InvalidOperationException("Cancellation token source was not initialised.");
             }
 
-            job.Progress = 0;
-            job.Speed = "0 MB/s";
-            job.UpdateDisplay();
-
             Directory.CreateDirectory(job.OutputDirectory);
 
-            var stopwatch = Stopwatch.StartNew();
-
-            await using FileStream inputStream = new(job.InputPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            await using FileStream outputStream = new(job.OutputPath, FileMode.Create, FileAccess.Write, FileShare.None);
-
-            byte[] buffer = new byte[128 * 1024];
-            long totalBytes = inputStream.Length;
-            long writtenBytes = 0;
-
-            while (true)
+            UpdateJobSafely(job, () =>
             {
-                job.CancellationToken.Token.ThrowIfCancellationRequested();
+                job.Progress = 0;
+                job.Speed = "0 MB/s";
+            });
 
-                int bytesRead = await inputStream.ReadAsync(buffer.AsMemory(0, buffer.Length), job.CancellationToken.Token);
-                if (bytesRead == 0)
+            MediaEncodingProfile profile = CreateEncodingProfile(job);
+
+            if (job.MuteAudio && profile.Audio != null && !job.AudioOnly)
+            {
+                profile.Audio = null;
+            }
+
+            StorageFile inputFile = await StorageFile.GetFileFromPathAsync(job.InputPath);
+            StorageFolder outputFolder = await StorageFolder.GetFolderFromPathAsync(job.OutputDirectory);
+            StorageFile outputFile = await outputFolder.CreateFileAsync(Path.GetFileName(job.OutputPath), CreationCollisionOption.ReplaceExisting);
+
+            UpdateJobSafely(job, () => job.OutputPath = outputFile.Path);
+
+            await PopulateJobDurationAsync(job, inputFile);
+
+            var transcoder = new MediaTranscoder
+            {
+                HardwareAccelerationEnabled = true,
+                AlwaysReencode = true
+            };
+
+            var prepareResult = await transcoder.PrepareFileTranscodeAsync(inputFile, outputFile, profile);
+
+            if (!prepareResult.CanTranscode)
+            {
+                throw new InvalidOperationException($"Unable to transcode file. Reason: {prepareResult.FailureReason}");
+            }
+
+            var stopwatch = Stopwatch.StartNew();
+            var transcodeOperation = prepareResult.TranscodeAsync();
+
+            transcodeOperation.Progress = new AsyncActionProgressHandler<double>((_, progress) =>
+            {
+                int progressValue = (int)Math.Clamp(Math.Round(progress), 0, 100);
+                string speed = FormatSpeed(job.FileSize, stopwatch.Elapsed, progressValue);
+
+                UpdateJobSafely(job, () =>
                 {
-                    break;
-                }
+                    job.Progress = progressValue;
+                    job.Speed = speed;
+                });
+            });
 
-                await outputStream.WriteAsync(buffer.AsMemory(0, bytesRead), job.CancellationToken.Token);
-                writtenBytes += bytesRead;
-
-                if (totalBytes > 0)
-                {
-                    int progress = (int)Math.Round(writtenBytes * 100d / totalBytes);
-                    job.Progress = Math.Clamp(progress, 0, 100);
-                }
-                else
-                {
-                    job.Progress = 100;
-                }
-
-                double seconds = stopwatch.Elapsed.TotalSeconds;
-                if (seconds > 0 && writtenBytes > 0)
-                {
-                    double bytesPerSecond = writtenBytes / seconds;
-                    job.Speed = $"{bytesPerSecond / (1024d * 1024d):0.##} MB/s";
-                }
-
-                job.UpdateDisplay();
+            using (job.CancellationToken.Token.Register(() => transcodeOperation.Cancel()))
+            {
+                await transcodeOperation.AsTask(job.CancellationToken.Token);
             }
 
             stopwatch.Stop();
 
-            job.Progress = 100;
-            job.Speed = stopwatch.Elapsed.TotalSeconds > 0
-                ? $"{(writtenBytes / stopwatch.Elapsed.TotalSeconds) / (1024d * 1024d):0.##} MB/s"
+            long outputSize = 0;
+            if (File.Exists(outputFile.Path))
+            {
+                outputSize = new FileInfo(outputFile.Path).Length;
+            }
+
+            double totalSeconds = stopwatch.Elapsed.TotalSeconds;
+            string finalSpeed = totalSeconds > 0
+                ? $"{((outputSize > 0 ? outputSize : job.FileSize) / totalSeconds) / (1024d * 1024d):0.##} MB/s"
                 : "0 MB/s";
-            job.UpdateDisplay();
+
+            UpdateJobSafely(job, () =>
+            {
+                job.Progress = 100;
+                job.Speed = finalSpeed;
+            });
         }
 
         private bool IsVideoOrAudioFile(string file)
         {
             string[] extensions = { ".mp4", ".wmv", ".avi", ".webm", ".mp3", ".m4a", ".wma", ".wav" };
             return extensions.Contains(Path.GetExtension(file).ToLower());
+        }
+
+        private void UpdateJobSafely(ConversionJob job, Action updateAction)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)(() =>
+                {
+                    updateAction();
+                    job.UpdateDisplay();
+                }));
+            }
+            else
+            {
+                updateAction();
+                job.UpdateDisplay();
+            }
+        }
+
+        private async Task PopulateJobDurationAsync(ConversionJob job, StorageFile file)
+        {
+            try
+            {
+                if (!job.AudioOnly)
+                {
+                    VideoProperties videoProps = await file.Properties.GetVideoPropertiesAsync();
+                    if (videoProps.Duration > TimeSpan.Zero)
+                    {
+                        job.TotalDuration = videoProps.Duration;
+                        return;
+                    }
+                }
+
+                MusicProperties audioProps = await file.Properties.GetMusicPropertiesAsync();
+                if (audioProps.Duration > TimeSpan.Zero)
+                {
+                    job.TotalDuration = audioProps.Duration;
+                }
+            }
+            catch
+            {
+                job.TotalDuration = TimeSpan.Zero;
+            }
+        }
+
+        private MediaEncodingProfile CreateEncodingProfile(ConversionJob job)
+        {
+            string format = job.OutputFormat.ToUpperInvariant();
+
+            if (job.AudioOnly)
+            {
+                AudioEncodingQuality audioQuality = MapAudioQuality(job.Quality);
+                MediaEncodingProfile audioProfile = format switch
+                {
+                    "MP3" => MediaEncodingProfile.CreateMp3(audioQuality),
+                    "M4A" => MediaEncodingProfile.CreateM4a(audioQuality),
+                    "WMA" => MediaEncodingProfile.CreateWma(audioQuality),
+                    "WAV" => MediaEncodingProfile.CreateWav(audioQuality),
+                    _ => MediaEncodingProfile.CreateMp3(audioQuality)
+                };
+
+                ApplyAudioBitrate(job, audioProfile);
+                return audioProfile;
+            }
+            else
+            {
+                VideoEncodingQuality videoQuality = VideoEncodingQuality.Auto;
+
+                MediaEncodingProfile videoProfile = format switch
+                {
+                    "MP4" => MediaEncodingProfile.CreateMp4(videoQuality),
+                    "WMV" => MediaEncodingProfile.CreateWmv(videoQuality),
+                    "AVI" => MediaEncodingProfile.CreateAvi(videoQuality),
+                    "WEBM" => MediaEncodingProfile.CreateWebM(videoQuality),
+                    _ => MediaEncodingProfile.CreateMp4(videoQuality)
+                };
+
+                ApplyResolution(job, videoProfile);
+                ApplyVideoBitrate(job, videoProfile);
+                ApplyAudioBitrate(job, videoProfile);
+
+                return videoProfile;
+            }
+        }
+
+        private void ApplyResolution(ConversionJob job, MediaEncodingProfile profile)
+        {
+            if (profile.Video is null)
+            {
+                return;
+            }
+
+            (uint width, uint height)? resolution = TryParseResolution(job.Resolution);
+            if (resolution.HasValue)
+            {
+                profile.Video.Width = resolution.Value.width;
+                profile.Video.Height = resolution.Value.height;
+            }
+        }
+
+        private void ApplyVideoBitrate(ConversionJob job, MediaEncodingProfile profile)
+        {
+            if (profile.Video is null)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(job.CustomBitrate) && uint.TryParse(job.CustomBitrate, out uint customKbps))
+            {
+                profile.Video.Bitrate = customKbps * 1000;
+                return;
+            }
+
+            uint? bitrate = job.Quality switch
+            {
+                string q when q.Contains("Low", StringComparison.OrdinalIgnoreCase) => 1_500_000u,
+                string q when q.Contains("Medium", StringComparison.OrdinalIgnoreCase) => 4_000_000u,
+                _ => null
+            };
+
+            if (bitrate.HasValue)
+            {
+                profile.Video.Bitrate = bitrate.Value;
+            }
+        }
+
+        private void ApplyAudioBitrate(ConversionJob job, MediaEncodingProfile profile)
+        {
+            if (profile.Audio is null)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(job.CustomBitrate) && uint.TryParse(job.CustomBitrate, out uint customKbps))
+            {
+                profile.Audio.Bitrate = customKbps * 1000;
+                return;
+            }
+
+            uint? bitrate = job.Quality switch
+            {
+                string q when q.Contains("Low", StringComparison.OrdinalIgnoreCase) => 128_000u,
+                string q when q.Contains("Medium", StringComparison.OrdinalIgnoreCase) => 192_000u,
+                _ => 256_000u
+            };
+
+            profile.Audio.Bitrate = bitrate.Value;
+        }
+
+        private AudioEncodingQuality MapAudioQuality(string? qualityText)
+        {
+            if (qualityText is null)
+            {
+                return AudioEncodingQuality.High;
+            }
+
+            if (qualityText.Contains("Low", StringComparison.OrdinalIgnoreCase))
+            {
+                return AudioEncodingQuality.Low;
+            }
+
+            if (qualityText.Contains("Medium", StringComparison.OrdinalIgnoreCase))
+            {
+                return AudioEncodingQuality.Medium;
+            }
+
+            return AudioEncodingQuality.High;
+        }
+
+        private (uint width, uint height)? TryParseResolution(string? resolutionText)
+        {
+            if (string.IsNullOrWhiteSpace(resolutionText) || resolutionText.Equals("Original", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            string candidate = resolutionText.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[0];
+            string[] parts = candidate.Split('x');
+
+            if (parts.Length == 2 && uint.TryParse(parts[0], out uint width) && uint.TryParse(parts[1], out uint height))
+            {
+                return (width, height);
+            }
+
+            return null;
+        }
+
+        private string FormatSpeed(long fileSize, TimeSpan elapsed, int progressPercentage)
+        {
+            if (elapsed.TotalSeconds <= 0 || fileSize <= 0 || progressPercentage <= 0)
+            {
+                return "0 MB/s";
+            }
+
+            double processedBytes = fileSize * (progressPercentage / 100d);
+            double bytesPerSecond = processedBytes / elapsed.TotalSeconds;
+            return $"{bytesPerSecond / (1024d * 1024d):0.##} MB/s";
         }
 
         private void UpdateStatusBar()
