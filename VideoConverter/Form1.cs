@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -21,7 +22,7 @@ namespace VideoConverter
         private List<ConversionJob> conversionQueue = new List<ConversionJob>();
         private BindingList<ConversionJob> jobBindingList;
         private ToolTip navigationToolTip;
-        private const int MAX_CONCURRENT_CONVERSIONS = 3;
+        private int maxConcurrentConversions = 3;
         private int activeConversions = 0;
         private string ffmpegPath = "ffmpeg.exe";
         private bool ffmpegAvailable;
@@ -36,6 +37,7 @@ namespace VideoConverter
         private CheckBox chkAudioOnlyControl;
         private CheckBox chkGpuAccelerationControl;
         private CheckBox chkAutoShutdownControl;
+        private NumericUpDown nudConcurrencyControl;
         private Label lblAudioFileControl;
         private TextBox txtOutputPathControl;
         private bool autoShutdownEnabled;
@@ -44,9 +46,24 @@ namespace VideoConverter
         private readonly List<string> availableHardwareEncoders = new List<string>();
         private string preferredHardwareEncoder;
         private string hardwareAccelerationArgs = string.Empty;
+        private readonly string appDataDirectory;
+        private readonly string settingsFilePath;
+        private readonly string queueCachePath;
+        private readonly string jobHistoryPath;
+        private readonly object logLock = new object();
+        private AppSettings currentSettings;
+        private bool isRestoringState;
+        private bool queueProcessingActive;
+        private bool? preferredGpuToggleState;
+        private const int MAX_RETRIES = 2;
 
         public Form1()
         {
+            appDataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "HillsVideoConverter");
+            settingsFilePath = Path.Combine(appDataDirectory, "settings.json");
+            queueCachePath = Path.Combine(appDataDirectory, "queue.json");
+            jobHistoryPath = Path.Combine(appDataDirectory, "history.log");
+
             InitializeComponent();
             InitializeCustomComponents();
         }
@@ -62,6 +79,8 @@ namespace VideoConverter
             this.DragDrop += Form1_DragDrop;
             this.BackColor = Color.FromArgb(30, 30, 30);
 
+            Directory.CreateDirectory(appDataDirectory);
+
             jobBindingList = new BindingList<ConversionJob>();
             navigationToolTip = new ToolTip
             {
@@ -73,8 +92,17 @@ namespace VideoConverter
                 ForeColor = Color.White
             };
 
+            isRestoringState = true;
             CreateUI();
             CheckFFmpegAvailability();
+            LoadSettings();
+            RestoreQueueSnapshot();
+            UpdateStatusBar();
+            if (queueProcessingActive && conversionQueue.Any(j => j.Status == ConversionStatus.Queued))
+            {
+                LogJobEvent(null, $"Auto-resuming {conversionQueue.Count(j => j.Status == ConversionStatus.Queued)} queued job(s) from last session.");
+                TryLaunchConversions();
+            }
         }
 
         private void CreateUI()
@@ -137,6 +165,256 @@ namespace VideoConverter
             contextMenu.Items.Add("Cancel Conversion", null, (s, e) => CancelSelectedJob(dgvJobs));
             dgvJobs.ContextMenuStrip = contextMenu;
         }
+
+        #region Settings & Persistence
+
+        private void EnsureSettings()
+        {
+            if (currentSettings == null)
+            {
+                currentSettings = new AppSettings();
+            }
+
+            if (currentSettings.MaxParallelConversions <= 0)
+            {
+                currentSettings.MaxParallelConversions = 3;
+            }
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                if (File.Exists(settingsFilePath))
+                {
+                    string json = File.ReadAllText(settingsFilePath);
+                    currentSettings = JsonSerializer.Deserialize<AppSettings>(json);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogJobEvent(null, $"Settings load failed: {ex.Message}");
+                currentSettings = null;
+            }
+
+            EnsureSettings();
+
+            isRestoringState = true;
+
+            preferredGpuToggleState = currentSettings.UseGpu;
+
+            if (chkAudioOnlyControl != null)
+            {
+                chkAudioOnlyControl.Checked = currentSettings.AudioOnly;
+            }
+
+            if (cmbFormatControl != null)
+            {
+                SetComboSelection(cmbFormatControl, currentSettings.SelectedFormat);
+            }
+
+            if (cmbResolutionControl != null)
+            {
+                SetComboSelection(cmbResolutionControl, currentSettings.SelectedResolution);
+            }
+
+            if (cmbQualityControl != null)
+            {
+                SetComboSelection(cmbQualityControl, currentSettings.SelectedQuality);
+            }
+
+            if (cmbPresetControl != null)
+            {
+                SetComboSelection(cmbPresetControl, currentSettings.SelectedPreset);
+            }
+
+            if (txtBitrateControl != null && !string.IsNullOrWhiteSpace(currentSettings.CustomBitrate))
+            {
+                txtBitrateControl.Text = currentSettings.CustomBitrate;
+            }
+
+            if (txtBitrateControl != null)
+            {
+                bool showBitrate = cmbQualityControl?.SelectedIndex == 3;
+                txtBitrateControl.Visible = showBitrate;
+                var bitrateLabel = this.Controls.Find("lblBitrate", true).FirstOrDefault() as Label;
+                if (bitrateLabel != null)
+                {
+                    bitrateLabel.Visible = showBitrate;
+                }
+            }
+
+            if (chkMuteAudioControl != null)
+            {
+                chkMuteAudioControl.Checked = currentSettings.MuteAudio;
+            }
+
+            if (chkGpuAccelerationControl != null)
+            {
+                chkGpuAccelerationControl.Checked = currentSettings.UseGpu;
+            }
+
+            if (chkAutoShutdownControl != null)
+            {
+                chkAutoShutdownControl.Checked = currentSettings.AutoShutdown;
+            }
+
+            autoShutdownEnabled = currentSettings.AutoShutdown;
+
+            if (txtOutputPathControl != null && !string.IsNullOrWhiteSpace(currentSettings.OutputPath))
+            {
+                txtOutputPathControl.Text = currentSettings.OutputPath;
+            }
+
+            if (nudConcurrencyControl != null)
+            {
+                int clamped = Math.Max((int)nudConcurrencyControl.Minimum, Math.Min((int)nudConcurrencyControl.Maximum, currentSettings.MaxParallelConversions));
+                maxConcurrentConversions = clamped;
+                nudConcurrencyControl.Value = clamped;
+            }
+            else
+            {
+                maxConcurrentConversions = Math.Max(1, currentSettings.MaxParallelConversions);
+            }
+
+            queueProcessingActive = currentSettings.AutoResumeQueue;
+
+            isRestoringState = false;
+
+            UpdateGpuToggleAvailability();
+        }
+
+        private void SaveSettings()
+        {
+            if (isRestoringState)
+            {
+                return;
+            }
+
+            try
+            {
+                EnsureSettings();
+                currentSettings.MaxParallelConversions = maxConcurrentConversions;
+                currentSettings.AutoResumeQueue = queueProcessingActive;
+                Directory.CreateDirectory(appDataDirectory);
+                string json = JsonSerializer.Serialize(currentSettings, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(settingsFilePath, json);
+            }
+            catch (Exception ex)
+            {
+                LogJobEvent(null, $"Settings save failed: {ex.Message}");
+            }
+        }
+
+        private void RestoreQueueSnapshot()
+        {
+            try
+            {
+                if (!File.Exists(queueCachePath))
+                {
+                    return;
+                }
+
+                string json = File.ReadAllText(queueCachePath);
+                var snapshot = JsonSerializer.Deserialize<List<ConversionJobSnapshot>>(json);
+                if (snapshot == null || snapshot.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (var entry in snapshot)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.InputPath) || !File.Exists(entry.InputPath))
+                    {
+                        LogJobEvent(null, $"Skipped missing source during restore: {entry.InputPath}");
+                        continue;
+                    }
+
+                    FileInfo fi = new FileInfo(entry.InputPath);
+
+                    ConversionJob job = new ConversionJob
+                    {
+                        InputPath = entry.InputPath,
+                        FileName = fi.Name,
+                        FileSize = fi.Length,
+                        OutputFormat = entry.OutputFormat ?? currentSettings?.SelectedFormat ?? "MP4",
+                        Resolution = entry.Resolution ?? "Original",
+                        Quality = entry.Quality ?? "High (Original)",
+                        CustomBitrate = entry.CustomBitrate,
+                        MuteAudio = entry.MuteAudio,
+                        AudioOnly = entry.AudioOnly,
+                        AudioOverlayPath = entry.AudioOverlayPath,
+                        OutputDirectory = entry.OutputDirectory ?? currentSettings?.OutputPath ?? Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
+                        UseGpuAcceleration = entry.UseGpuAcceleration,
+                        HardwareEncoder = entry.HardwareEncoder,
+                        Status = ConversionStatus.Queued,
+                        RetryCount = Math.Max(0, entry.RetryCount),
+                        RetryPending = false
+                    };
+
+                    try
+                    {
+                        job.OutputPath = GenerateOutputPath(job);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogJobEvent(job, $"Unable to prepare output during restore: {ex.Message}");
+                        continue;
+                    }
+
+                    conversionQueue.Add(job);
+                    jobBindingList.Add(job);
+                }
+
+                if (conversionQueue.Any(j => j.Status == ConversionStatus.Queued))
+                {
+                    LogJobEvent(null, $"Restored {conversionQueue.Count(j => j.Status == ConversionStatus.Queued)} queued job(s) from previous session.");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogJobEvent(null, $"Queue restore failed: {ex.Message}");
+            }
+        }
+
+        private void PersistQueueSnapshot()
+        {
+            try
+            {
+                Directory.CreateDirectory(appDataDirectory);
+                var snapshot = conversionQueue
+                    .Where(j => j.Status == ConversionStatus.Queued)
+                    .Select(ConversionJobSnapshot.FromJob)
+                    .ToList();
+
+                string json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(queueCachePath, json);
+            }
+            catch (Exception ex)
+            {
+                LogJobEvent(null, $"Queue persistence failed: {ex.Message}");
+            }
+        }
+
+        private void LogJobEvent(ConversionJob job, string message)
+        {
+            try
+            {
+                Directory.CreateDirectory(appDataDirectory);
+                string prefix = job != null ? job.FileName : "SYSTEM";
+                string line = $"{DateTime.Now:O} | {prefix} | {message}";
+                lock (logLock)
+                {
+                    File.AppendAllText(jobHistoryPath, line + Environment.NewLine);
+                }
+            }
+            catch
+            {
+                // Swallow logging failures; we don't want to interrupt conversions.
+            }
+        }
+
+        #endregion
 
         private Panel CreateNavigationPanel()
         {
@@ -368,7 +646,11 @@ namespace VideoConverter
             Button btnAddFolder = CreateStyledButton("📂 Ingest Folder", new Size(200, 48));
             btnAddFolder.Click += BtnAddFolder_Click;
             Button btnClearQueue = CreateStyledButton("🧹 Purge Queue", new Size(190, 48));
-            btnClearQueue.Click += (s, e) => ClearQueue();
+            btnClearQueue.Click += (s, e) =>
+            {
+                ClearQueue();
+                PersistQueueSnapshot();
+            };
 
             buttonRow.Controls.Add(btnAddFiles);
             buttonRow.Controls.Add(btnAddFolder);
@@ -409,6 +691,15 @@ namespace VideoConverter
             };
             cmbResolutionControl.Items.AddRange(new string[] { "Original", "3840x2160 (4K)", "2560x1440 (2K)", "1920x1080 (1080p)", "1280x720 (720p)", "854x480 (480p)", "640x360 (360p)" });
             cmbResolutionControl.SelectedIndex = 0;
+            cmbResolutionControl.SelectedIndexChanged += (s, e) =>
+            {
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.SelectedResolution = cmbResolutionControl.SelectedItem?.ToString();
+                    SaveSettings();
+                }
+            };
 
             cmbQualityControl = new ComboBox
             {
@@ -449,12 +740,32 @@ namespace VideoConverter
                 Text = "5000",
                 Visible = false
             };
+            txtBitrateControl.TextChanged += (s, e) =>
+            {
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.CustomBitrate = txtBitrateControl.Text;
+                    SaveSettings();
+                }
+            };
 
             cmbQualityControl.SelectedIndexChanged += (s, e) =>
             {
                 bool isCustom = cmbQualityControl.SelectedIndex == 3;
                 lblBitrate.Visible = isCustom;
                 txtBitrateControl.Visible = isCustom;
+                if (!isCustom)
+                {
+                    txtBitrateControl.Text = string.Empty;
+                }
+
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.SelectedQuality = cmbQualityControl.SelectedItem?.ToString();
+                    SaveSettings();
+                }
             };
 
             FlowLayoutPanel optionsRow = new FlowLayoutPanel
@@ -502,6 +813,15 @@ namespace VideoConverter
                 AutoSize = true,
                 Margin = new Padding(0, 6, 18, 0)
             };
+            chkMuteAudioControl.CheckedChanged += (s, e) =>
+            {
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.MuteAudio = chkMuteAudioControl.Checked;
+                    SaveSettings();
+                }
+            };
 
             chkAudioOnlyControl = new CheckBox
             {
@@ -545,7 +865,54 @@ namespace VideoConverter
                 {
                     shutdownScheduled = false;
                 }
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.AutoShutdown = autoShutdownEnabled;
+                    SaveSettings();
+                }
             };
+
+            FlowLayoutPanel concurrencyPanel = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.LeftToRight,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Margin = new Padding(0, 6, 18, 0)
+            };
+
+            Label lblConcurrency = CreateStyledLabel("Parallel Jobs");
+            lblConcurrency.Margin = new Padding(0, 3, 6, 0);
+
+            nudConcurrencyControl = new NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 6,
+                Value = maxConcurrentConversions,
+                Width = 60,
+                BackColor = Color.FromArgb(45, 50, 72),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold)
+            };
+            nudConcurrencyControl.ValueChanged += (s, e) =>
+            {
+                maxConcurrentConversions = (int)nudConcurrencyControl.Value;
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.MaxParallelConversions = maxConcurrentConversions;
+                    SaveSettings();
+                }
+                if (queueProcessingActive)
+                {
+                    TryLaunchConversions();
+                }
+                UpdateStatusBar();
+            };
+
+            concurrencyPanel.Controls.Add(lblConcurrency);
+            concurrencyPanel.Controls.Add(nudConcurrencyControl);
 
             Button btnAudioOverlay = CreateStyledButton("🎵 Audio Overlay", new Size(190, 40));
             btnAudioOverlay.Click += BtnAudioOverlay_Click;
@@ -565,6 +932,7 @@ namespace VideoConverter
             togglesRow.Controls.Add(chkAudioOnlyControl);
             togglesRow.Controls.Add(chkGpuAccelerationControl);
             togglesRow.Controls.Add(chkAutoShutdownControl);
+            togglesRow.Controls.Add(concurrencyPanel);
             togglesRow.Controls.Add(btnAudioOverlay);
             togglesRow.Controls.Add(lblAudioFileControl);
             layout.Controls.Add(togglesRow, 0, 4);
@@ -600,6 +968,15 @@ namespace VideoConverter
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Width = 420,
                 Text = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
+            };
+            txtOutputPathControl.TextChanged += (s, e) =>
+            {
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.OutputPath = txtOutputPathControl.Text;
+                    SaveSettings();
+                }
             };
 
             Button btnBrowseOutput = CreateStyledButton("Browse Vault", new Size(160, 40));
@@ -642,6 +1019,12 @@ namespace VideoConverter
             if (cmbPresetControl?.SelectedItem is string preset)
             {
                 ApplyPreset(preset);
+                if (!isRestoringState)
+                {
+                    EnsureSettings();
+                    currentSettings.SelectedPreset = preset;
+                    SaveSettings();
+                }
             }
         }
 
@@ -714,6 +1097,12 @@ namespace VideoConverter
         private void ChkAudioOnlyControl_CheckedChanged(object sender, EventArgs e)
         {
             ConfigureAudioOnlyMode(chkAudioOnlyControl?.Checked ?? false);
+            if (!isRestoringState)
+            {
+                EnsureSettings();
+                currentSettings.AudioOnly = chkAudioOnlyControl?.Checked ?? false;
+                SaveSettings();
+            }
         }
 
         private void CmbFormatControl_SelectedIndexChanged(object sender, EventArgs e)
@@ -734,6 +1123,13 @@ namespace VideoConverter
                 chkGpuAccelerationControl.Checked = false;
             }
             chkGpuAccelerationControl.CheckedChanged += ChkGpuAccelerationControl_CheckedChanged;
+
+            if (!isRestoringState)
+            {
+                EnsureSettings();
+                currentSettings.SelectedFormat = cmbFormatControl.SelectedItem?.ToString();
+                SaveSettings();
+            }
         }
 
         private void ConfigureAudioOnlyMode(bool audioOnly)
@@ -842,6 +1238,15 @@ namespace VideoConverter
                 MessageBox.Show("No compatible GPU encoder was detected. Hardware acceleration is unavailable on this system.",
                     "Hardware Acceleration", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
+
+            preferredGpuToggleState = chkGpuAccelerationControl.Checked;
+
+            if (!isRestoringState)
+            {
+                EnsureSettings();
+                currentSettings.UseGpu = chkGpuAccelerationControl.Checked;
+                SaveSettings();
+            }
         }
 
         private DataGridView CreateJobsGrid()
@@ -922,7 +1327,7 @@ namespace VideoConverter
             Label lblStatus = new Label
             {
                 Name = "lblStatus",
-                Text = "Ready | Queue: 0 files | Active Conversions: 0/3",
+                Text = $"Ready | Queue: 0 files | Active Conversions: 0/{maxConcurrentConversions}",
                 ForeColor = Color.FromArgb(210, 220, 245),
                 Font = new Font("Segoe UI", 10, FontStyle.Bold),
                 Dock = DockStyle.Fill,
@@ -937,9 +1342,10 @@ namespace VideoConverter
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Margin = new Padding(0)
             };
-            statusBadges.Controls.Add(CreateBadge("Autosave ON", Color.FromArgb(120, 210, 120), Color.Black, Color.FromArgb(200, 255, 200)));
-            statusBadges.Controls.Add(CreateBadge("Resilience Shield", Color.FromArgb(255, 200, 120), Color.Black, Color.FromArgb(255, 235, 200)));
-            statusBadges.Controls.Add(CreateBadge("Cloud Sync Linked", Color.FromArgb(150, 200, 255), Color.Black, Color.FromArgb(220, 240, 255)));
+            statusBadges.Controls.Add(CreateBadge("Settings Autosave", Color.FromArgb(120, 210, 120), Color.Black, Color.FromArgb(200, 255, 200)));
+            statusBadges.Controls.Add(CreateBadge("Auto Retry Shield", Color.FromArgb(255, 200, 120), Color.Black, Color.FromArgb(255, 235, 200)));
+            statusBadges.Controls.Add(CreateBadge("Queue Restore Armed", Color.FromArgb(150, 200, 255), Color.Black, Color.FromArgb(220, 240, 255)));
+            statusBadges.Controls.Add(CreateBadge("Audit Log Trail", Color.FromArgb(200, 160, 255), Color.Black, Color.FromArgb(230, 210, 255)));
             statusLayout.Controls.Add(statusBadges, 1, 0);
 
             return statusBar;
@@ -1255,6 +1661,8 @@ namespace VideoConverter
                 return;
             }
 
+            bool addedAny = false;
+
             foreach (string file in files)
             {
                 if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
@@ -1321,9 +1729,20 @@ namespace VideoConverter
 
                 conversionQueue.Add(job);
                 jobBindingList.Add(job);
+                addedAny = true;
+                LogJobEvent(job, $"Queued for {job.OutputFormat} {(job.AudioOnly ? "(audio only)" : job.Resolution)}");
             }
 
             UpdateStatusBar();
+
+            if (addedAny)
+            {
+                PersistQueueSnapshot();
+                if (queueProcessingActive)
+                {
+                    TryLaunchConversions();
+                }
+            }
         }
 
         private string GenerateOutputPath(ConversionJob job)
@@ -1363,6 +1782,11 @@ namespace VideoConverter
                 jobBindingList.Remove(job);
             }
             UpdateStatusBar();
+            if (queuedJobs.Count > 0)
+            {
+                LogJobEvent(null, $"Cleared {queuedJobs.Count} queued job(s) at operator request.");
+                PersistQueueSnapshot();
+            }
         }
 
         private void RemoveSelectedJobs(DataGridView dgv)
@@ -1380,6 +1804,11 @@ namespace VideoConverter
                     jobBindingList.Remove(job);
                 }
                 UpdateStatusBar();
+                if (selectedJobs.Count > 0)
+                {
+                    LogJobEvent(null, $"Removed {selectedJobs.Count} job(s) from queue.");
+                    PersistQueueSnapshot();
+                }
             }
         }
 
@@ -1393,6 +1822,8 @@ namespace VideoConverter
                     job.CancellationToken?.Cancel();
                     job.Status = ConversionStatus.Cancelled;
                     job.UpdateDisplay();
+                    LogJobEvent(job, "Conversion cancelled by operator.");
+                    PersistQueueSnapshot();
                 }
             }
         }
@@ -1413,34 +1844,100 @@ namespace VideoConverter
             }
         }
 
-        #endregion
-
-        #region Conversion
-
-        private async void BtnStartConversion_Click(object sender, EventArgs e)
+        private bool ValidateQueuedJobs()
         {
             var queuedJobs = conversionQueue.Where(j => j.Status == ConversionStatus.Queued).ToList();
-
             if (queuedJobs.Count == 0)
             {
-                MessageBox.Show("No files in queue to convert!", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+
+            var missingSources = queuedJobs.Where(j => !File.Exists(j.InputPath)).ToList();
+            foreach (var job in missingSources)
+            {
+                job.Status = ConversionStatus.Failed;
+                job.ErrorMessage = "Source file missing";
+                job.UpdateDisplay();
+                LogJobEvent(job, "Validation failed: source file missing.");
+            }
+
+            if (missingSources.Count > 0)
+            {
+                MessageBox.Show($"Skipped {missingSources.Count} job(s) because the source media was not found.", "Queue Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+
+            PersistQueueSnapshot();
+            UpdateStatusBar();
+
+            return conversionQueue.Any(j => j.Status == ConversionStatus.Queued);
+        }
+
+        private void TryLaunchConversions()
+        {
+            if (!queueProcessingActive)
+            {
                 return;
             }
 
-            // Start conversions (limited by MAX_CONCURRENT_CONVERSIONS)
-            foreach (var job in queuedJobs)
+            if (InvokeRequired)
             {
-                while (activeConversions >= MAX_CONCURRENT_CONVERSIONS)
+                BeginInvoke((MethodInvoker)TryLaunchConversions);
+                return;
+            }
+
+            foreach (var job in conversionQueue.Where(j => j.Status == ConversionStatus.Queued && !j.RetryPending).ToList())
+            {
+                if (activeConversions >= maxConcurrentConversions)
                 {
-                    await Task.Delay(500);
+                    break;
                 }
 
                 StartConversion(job);
             }
         }
 
+        #endregion
+
+        #region Conversion
+
+        private void BtnStartConversion_Click(object sender, EventArgs e)
+        {
+            if (!conversionQueue.Any(j => j.Status == ConversionStatus.Queued))
+            {
+                MessageBox.Show("No files in queue to convert!", "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (!ValidateQueuedJobs())
+            {
+                MessageBox.Show("No valid jobs are ready to convert after validation.", "Queue", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            queueProcessingActive = true;
+            SaveSettings();
+            LogJobEvent(null, $"Queue processing started for {conversionQueue.Count(j => j.Status == ConversionStatus.Queued)} job(s).");
+            TryLaunchConversions();
+        }
+
         private async void StartConversion(ConversionJob job)
         {
+            try
+            {
+                job.OutputPath = GenerateOutputPath(job);
+            }
+            catch (Exception ex)
+            {
+                job.Status = ConversionStatus.Failed;
+                job.ErrorMessage = ex.Message;
+                job.UpdateDisplay();
+                LogJobEvent(job, $"Output validation failed: {ex.Message}");
+                PersistQueueSnapshot();
+                TryLaunchConversions();
+                return;
+            }
+
+            job.RetryPending = false;
             activeConversions++;
             UpdateStatusBar();
 
@@ -1448,6 +1945,8 @@ namespace VideoConverter
             job.StartTime = DateTime.Now;
             job.CancellationToken = new CancellationTokenSource();
             job.UpdateDisplay();
+            LogJobEvent(job, $"Starting conversion to {job.OutputFormat}{(job.UseGpuAcceleration ? $" with {job.HardwareEncoder}" : " (CPU)")}");
+            PersistQueueSnapshot();
 
             try
             {
@@ -1457,16 +1956,29 @@ namespace VideoConverter
                 {
                     job.Status = ConversionStatus.Completed;
                     job.Progress = 100;
+                    job.RetryCount = 0;
+                    LogJobEvent(job, $"Completed → {job.OutputPath}");
                 }
             }
             catch (OperationCanceledException)
             {
                 job.Status = ConversionStatus.Cancelled;
+                LogJobEvent(job, "Conversion cancelled mid-run.");
             }
             catch (Exception ex)
             {
                 job.Status = ConversionStatus.Failed;
                 job.ErrorMessage = ex.Message;
+                LogJobEvent(job, $"Conversion failed: {ex.Message}");
+                if (job.RetryCount < MAX_RETRIES)
+                {
+                    ScheduleRetry(job);
+                    return;
+                }
+                else
+                {
+                    LogJobEvent(job, $"Retries exhausted after {MAX_RETRIES + 1} attempts.");
+                }
             }
             finally
             {
@@ -1476,7 +1988,39 @@ namespace VideoConverter
                 TryTriggerAutoShutdown();
                 job.CancellationToken?.Dispose();
                 job.CancellationToken = null;
+                PersistQueueSnapshot();
+                TryLaunchConversions();
             }
+        }
+
+        private void ScheduleRetry(ConversionJob job)
+        {
+            job.RetryCount++;
+            job.RetryPending = true;
+            job.Status = ConversionStatus.Queued;
+            job.Progress = 0;
+            job.Speed = "0x";
+            job.StartTime = null;
+            job.TotalDuration = TimeSpan.Zero;
+            job.UpdateDisplay();
+
+            int totalAttempts = MAX_RETRIES + 1;
+            int nextAttempt = job.RetryCount + 1;
+            LogJobEvent(job, $"Retrying in {Math.Pow(2, job.RetryCount):0} second(s) (attempt {nextAttempt} of {totalAttempts}).");
+            PersistQueueSnapshot();
+
+            Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, job.RetryCount)));
+                BeginInvoke((MethodInvoker)(() =>
+                {
+                    job.RetryPending = false;
+                    if (queueProcessingActive)
+                    {
+                        TryLaunchConversions();
+                    }
+                }));
+            });
         }
 
         private void ConvertFile(ConversionJob job)
@@ -1559,6 +2103,7 @@ namespace VideoConverter
 
             BeginInvoke((MethodInvoker)(() =>
             {
+                LogJobEvent(null, "Prompting operator for auto-shutdown confirmation.");
                 DialogResult result = MessageBox.Show(
                     "All conversions are complete. Do you want to shut down the system in 60 seconds?",
                     "Auto Shutdown",
@@ -1568,6 +2113,7 @@ namespace VideoConverter
                 if (result == DialogResult.Yes)
                 {
                     ScheduleSystemShutdown();
+                    LogJobEvent(null, "Auto-shutdown approved by operator.");
                 }
                 else
                 {
@@ -1580,6 +2126,7 @@ namespace VideoConverter
                     {
                         chkAutoShutdownControl.Checked = false;
                     }
+                    LogJobEvent(null, "Auto-shutdown cancelled by operator.");
                 }
             }));
         }
@@ -1600,6 +2147,7 @@ namespace VideoConverter
                     {
                         chkAutoShutdownControl.Checked = false;
                     }
+                    LogJobEvent(null, "Auto-shutdown aborted: unsupported platform.");
                     return;
                 }
 
@@ -1611,10 +2159,12 @@ namespace VideoConverter
                     UseShellExecute = false
                 };
                 Process.Start(psi);
+                LogJobEvent(null, "Auto-shutdown scheduled (60 second timer).");
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Failed to schedule system shutdown: {ex.Message}", "Auto Shutdown", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                LogJobEvent(null, $"Auto-shutdown scheduling failed: {ex.Message}");
                 lock (shutdownLock)
                 {
                     shutdownScheduled = false;
@@ -1624,6 +2174,37 @@ namespace VideoConverter
                     chkAutoShutdownControl.Checked = false;
                 }
             }
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (e.CloseReason == CloseReason.UserClosing &&
+                (activeConversions > 0 || conversionQueue.Any(j => j.Status == ConversionStatus.Converting)))
+            {
+                DialogResult result = MessageBox.Show(
+                    "There are conversions still running. Are you sure you want to exit?",
+                    "Confirm Exit",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+
+                if (result == DialogResult.No)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
+
+            bool resumePreference = queueProcessingActive;
+            SaveSettings();
+            queueProcessingActive = false;
+            if (currentSettings != null)
+            {
+                currentSettings.AutoResumeQueue = resumePreference;
+            }
+            PersistQueueSnapshot();
+            LogJobEvent(null, "Application shutting down.");
+
+            base.OnFormClosing(e);
         }
 
         private string BuildFFmpegArguments(ConversionJob job)
@@ -2079,7 +2660,8 @@ namespace VideoConverter
 
             bool hasHardware = availableHardwareEncoders.Any();
             chkGpuAccelerationControl.Enabled = hasHardware;
-            chkGpuAccelerationControl.Checked = hasHardware;
+            bool desiredState = hasHardware && (preferredGpuToggleState ?? currentSettings?.UseGpu ?? false);
+            chkGpuAccelerationControl.Checked = desiredState;
             chkGpuAccelerationControl.ForeColor = hasHardware
                 ? Color.FromArgb(140, 220, 255)
                 : Color.FromArgb(120, 130, 150);
@@ -2106,13 +2688,64 @@ namespace VideoConverter
 
                 lblStatus.Invoke((MethodInvoker)delegate
                 {
-                    lblStatus.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{MAX_CONCURRENT_CONVERSIONS} | " +
+                    lblStatus.Text = $"Ready | Queue: {queuedCount} | Active: {activeConversions}/{maxConcurrentConversions} | " +
                                    $"Completed: {completedCount} | Failed: {failedCount}";
                 });
             }
         }
 
         #endregion
+    }
+
+    public class AppSettings
+    {
+        public string SelectedFormat { get; set; } = "MP4";
+        public string SelectedResolution { get; set; } = "Original";
+        public string SelectedQuality { get; set; } = "High (Original)";
+        public string SelectedPreset { get; set; } = "Cinematic HDR";
+        public string CustomBitrate { get; set; } = "5000";
+        public bool MuteAudio { get; set; }
+        public bool AudioOnly { get; set; }
+        public bool UseGpu { get; set; }
+        public bool AutoShutdown { get; set; }
+        public string OutputPath { get; set; } = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+        public int MaxParallelConversions { get; set; } = 3;
+        public bool AutoResumeQueue { get; set; }
+    }
+
+    public class ConversionJobSnapshot
+    {
+        public string InputPath { get; set; }
+        public string OutputFormat { get; set; }
+        public string Resolution { get; set; }
+        public string Quality { get; set; }
+        public string CustomBitrate { get; set; }
+        public bool MuteAudio { get; set; }
+        public bool AudioOnly { get; set; }
+        public string AudioOverlayPath { get; set; }
+        public string OutputDirectory { get; set; }
+        public bool UseGpuAcceleration { get; set; }
+        public string HardwareEncoder { get; set; }
+        public int RetryCount { get; set; }
+
+        public static ConversionJobSnapshot FromJob(ConversionJob job)
+        {
+            return new ConversionJobSnapshot
+            {
+                InputPath = job.InputPath,
+                OutputFormat = job.OutputFormat,
+                Resolution = job.Resolution,
+                Quality = job.Quality,
+                CustomBitrate = job.CustomBitrate,
+                MuteAudio = job.MuteAudio,
+                AudioOnly = job.AudioOnly,
+                AudioOverlayPath = job.AudioOverlayPath,
+                OutputDirectory = job.OutputDirectory,
+                UseGpuAcceleration = job.UseGpuAcceleration,
+                HardwareEncoder = job.HardwareEncoder,
+                RetryCount = job.RetryCount
+            };
+        }
     }
 
     #region ConversionJob Class
@@ -2141,6 +2774,8 @@ namespace VideoConverter
         public TimeSpan TotalDuration { get; set; }
         public CancellationTokenSource CancellationToken { get; set; }
         public string ErrorMessage { get; set; }
+        public int RetryCount { get; set; }
+        public bool RetryPending { get; set; }
 
         public ConversionStatus Status
         {
